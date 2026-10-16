@@ -473,3 +473,47 @@ table.bn td { padding: 8px; }
 
 /* Baris tombol di halaman v3 selalu boleh turun baris (tidak terpotong di layar sempit) */
 .page:is([data-page="kursus"], [data-page="aktivitas"], [data-page="bukunilai"], [data-page="banksoal"], [data-page="rubrik"], [data-page="pesan"], [data-page="logaktivitas"], [data-page="keamanan2"], [data-page="branding"]) .row:has(> .btn + .btn) { flex-wrap: wrap; }
+
+/* v3.1 — indikator simpan di latar (aksi kursus optimistik) */
+.simpan-st { display: inline-flex; align-items: center; gap: 5px; }
+.simpan-st .lucide { width: 14px; height: 14px; }
+.simpan-st.ok-t { font-weight: 600; }
+
+/* v3.1 — pembuat laporan PDF/Excel */
+.lap-pilih { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.lap-pilih button { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; text-align: left; padding: 12px; border: 1.5px solid var(--line); border-radius: 12px; background: #fff; transition: border-color .15s, background .15s; }
+.lap-pilih button .lucide { color: var(--navy); }
+.lap-pilih button b { font-size: 13.5px; }
+.lap-pilih button small { font-size: 11.5px; color: var(--muted); line-height: 1.35; }
+.lap-pilih button.on { border-color: var(--navy); background: var(--info-bg); box-shadow: 0 0 0 2px rgba(30,58,95,.12); }
+.modal-f #lbSt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 767px) { .lap-pilih { grid-template-columns: minmax(0, 1fr); } .modal-f #lbSt { flex-basis: 100%; } }
+
+/* ---------- v3.1: Kartu pelajar QR Code & pemindai QR ----------
+   Ukuran memakai satuan cqw (persen lebar kartu) → tata letak identik di layar lebar, HP 360 px, dan cetak 85,6 mm. */
+.idcard.qr { container-type: inline-size; padding: 0; }
+.idcard.qr .qr-in { padding: 3.8cqw 4.3cqw; flex: 1; display: flex; flex-direction: column; position: relative; z-index: 1; min-height: 0; }
+.idcard.qr .top { gap: 2.4cqw; font-size: 2.5cqw; }
+.idcard.qr .top img { width: 6.2cqw !important; height: 6.2cqw !important; border-radius: 1.4cqw !important; padding: .5cqw !important; }
+.idcard.qr .top small { font-size: 2.3cqw; }
+.idcard.qr .top b { font-size: 3cqw; line-height: 1.25; display: block; }
+.idcard.qr .top .idn { font-size: 2.3cqw; padding: .5cqw 1.9cqw; border-radius: 1.4cqw; white-space: nowrap; flex: none; }
+.idcard.qr .mid { align-items: center; gap: 2.9cqw; margin-top: 2.6cqw; }
+.idcard.qr .photo { width: 16.2cqw; height: 20cqw; border-radius: 1.9cqw; font-size: 5.2cqw; border-width: .5cqw; }
+.idcard.qr .nm { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 3.7cqw; line-height: 1.2; }
+.idcard.qr .kv2 { font-size: 2.6cqw; margin-top: .9cqw; }
+.idcard.qr .ver { font-size: 2.15cqw; padding: .7cqw 1.9cqw; gap: .9cqw; margin-top: 1.4cqw; border-radius: 99px; line-height: 1.25; }
+.idcard.qr .ver .lucide { width: 2.9cqw; height: 2.9cqw; flex: none; }
+.idcard.qr .qr-tile { flex: none; width: 29cqw; background: #fff; border-radius: 1.9cqw; padding: 1cqw 1cqw .7cqw; position: relative; z-index: 1; }
+.idcard.qr .qr-tile svg { display: block; width: 100%; height: auto; }
+.idcard.qr .qr-tile div { text-align: center; color: var(--text); font-family: var(--mono); font-size: 2cqw; font-weight: 700; letter-spacing: .02em; margin-top: .3cqw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.idcard.qr .qr-foot { display: flex; align-items: center; gap: 1.4cqw; margin-top: auto; padding-top: 1.7cqw; border-top: 1px solid rgba(255,255,255,.16); font-size: 2.2cqw; color: #C9D6E8; letter-spacing: .01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: relative; z-index: 1; }
+.idcard.qr .qr-foot .lucide { width: 3cqw; height: 3cqw; color: var(--amber); flex: none; }
+.idcard.qr .mid { flex: none; }
+.qr-mini { width: 40px; height: 40px; background: #fff; border-radius: 4px; flex: none; }
+.qr-mini svg { display: block; width: 100%; height: 100%; }
+.qr-besar { text-align: center; }
+.qr-besar svg { display: block; width: min(100%, 300px); height: auto; margin: 0 auto 10px; border: 1px solid var(--line); border-radius: 12px; }
+.qr-besar .mono { font-size: 15px; letter-spacing: .06em; }
+.scan-box.qr .frame { width: min(52%, 250px); aspect-ratio: 1; }
+@media (max-width: 767px) { .scan-box.qr .frame { width: min(68%, 260px); } }

@@ -21,8 +21,10 @@ daftarHalaman(['guru', 'siswa'], 'pesan', function () { return {
   },
   show: function (el, param) { if (param && this.st && param !== this.st.dengan && $('#chMain', el)) this.buka(el, { dengan: param }); },
   muatDaftar: function (el) {
-    var self = this;
+    var self = this, c = Store.get(userKey('lc:pesan.daftar|{}'), null);
+    var awal = self.daftar || (c && c.data.percakapan); if (awal) { self.daftar = awal; self.gambarDaftar(el); }   // v3.1: tampil seketika dari cache
     return api('pesan.daftar', {}).then(function (r) {
+      if (r.success) Store.set(userKey('lc:pesan.daftar|{}'), { t: Date.now(), h: '', data: r.data });
       if (!r.success) { $('#chDaftar', el).innerHTML = errorBox(r.message); return; }
       self.daftar = r.data.percakapan; self.st.v = r.data.v; ChatBadge.set(r.data.belum); self.gambarDaftar(el);
     });

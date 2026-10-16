@@ -1,5 +1,5 @@
 /* =====================================================================
-   SIAKAD SISWA — pages-akademik.js : Jadwal, Absensi (scan barcode),
+   SIAKAD SISWA — pages-akademik.js : Jadwal, Absensi (scan QR Code),
    Materi (unggah/embed) + penampil pop-up bersama guru & siswa.
    ===================================================================== */
 'use strict';
@@ -130,28 +130,43 @@ function jadwalForm(j) {
 }
 
 // =====================================================================
-// ABSENSI — Scan barcode (kamera/USB), input manual, riwayat & log
+// ABSENSI — Scan QR Code (kamera HP/laptop, alat scan USB/Bluetooth), input manual, riwayat & log
 // =====================================================================
 var Scanner = {
   stream: null, reader: null, loop: null, last: {}, video: null,
   start: async function (video, onCode) {
     this.stop(); this.video = video;
     var self = this, emit = function (code) { code = String(code || '').trim(); if (!code) return; var t = Date.now(); if (self.last[code] && t - self.last[code] < 3500) return; self.last[code] = t; onCode(code); };
-    var native = false;
-    if ('BarcodeDetector' in window) { try { var f = await BarcodeDetector.getSupportedFormats(); native = f.indexOf('code_128') > -1; } catch (e) {} }
+    // v3.1: QR Code diutamakan; barcode lama (CODE-128/39) tetap terbaca agar kartu lama masih berlaku.
+    // Satu jalur kamera untuk semua perangkat: detektor bawaan (Android/macOS/ChromeOS) atau ZXing (Windows/Linux/Firefox/iOS lama)
+    // dibaca bergiliran dari frame video — kegagalan satu frame tidak pernah menghentikan pemindaian.
+    var native = false, format = [], dekode;
+    if ('BarcodeDetector' in window) { try { var f = await BarcodeDetector.getSupportedFormats(); format = ['qr_code', 'code_128', 'code_39', 'ean_13'].filter(function (x) { return f.indexOf(x) > -1; }); native = format.indexOf('qr_code') > -1; } catch (e) {} }
     if (native) {
-      this.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } }, audio: false });
-      video.srcObject = this.stream; video.setAttribute('playsinline', ''); await video.play();
-      var det = new BarcodeDetector({ formats: ['code_128', 'qr_code', 'code_39', 'ean_13'] });
-      var tick = async function () { if (!self.stream) return; try { var r = await det.detect(video); if (r && r[0]) emit(r[0].rawValue); } catch (e) {} self.loop = setTimeout(tick, 220); };
-      tick();
-      return 'native';
+      var det = new BarcodeDetector({ formats: format });
+      dekode = async function () { var r = await det.detect(video); return r && r[0] ? r[0].rawValue : ''; };
+    } else {
+      await loadLib('https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js');
+      var hints = new Map(), rd = new ZXing.MultiFormatReader();
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE, ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39]);
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true); rd.setHints(hints);
+      var cv = document.createElement('canvas'), cx = cv.getContext('2d', { willReadFrequently: true });
+      dekode = function () {
+        var w = video.videoWidth, h = video.videoHeight; if (!w || !h) return '';
+        var k = Math.min(1, 1280 / Math.max(w, h)); cv.width = Math.round(w * k); cv.height = Math.round(h * k);
+        cx.drawImage(video, 0, 0, cv.width, cv.height);
+        try { return rd.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(new ZXing.HTMLCanvasElementLuminanceSource(cv)))).getText(); } catch (e) { return ''; } finally { try { rd.reset(); } catch (e) {} }
+      };
     }
-    await loadLib('https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js');
-    this.reader = new ZXing.BrowserMultiFormatReader();
-    await this.reader.decodeFromConstraints({ video: { facingMode: { ideal: 'environment' } } }, video, function (res) { if (res) emit(res.getText()); });
-    this.stream = video.srcObject;
-    return 'zxing';
+    this.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    video.srcObject = this.stream; video.setAttribute('playsinline', ''); video.muted = true; await video.play();
+    var tick = async function () {
+      if (!self.stream) return;
+      try { if (video.readyState >= 2) { var v = await dekode(); if (v) emit(v); } } catch (e) {}
+      if (self.stream) self.loop = setTimeout(tick, native ? 150 : 180);
+    };
+    tick();
+    return native ? 'native' : 'zxing';
   },
   stop: function () {
     clearTimeout(this.loop);
@@ -171,13 +186,13 @@ registerPage('guru', 'absensi', {
   init: function (el) {
     var st = this.st, self = this;
     st.mTanggal = todayStr(); st.rBulan = todayStr().substring(0, 7);
-    el.innerHTML = pageHead('Panel Guru <span>// Absensi & Kehadiran Siswa</span>', 'Manajemen Absensi', 'Pantau kehadiran harian, verifikasi scan barcode langsung, dan tinjau catatan kehadiran terpadu seluruh siswa.',
-      '<button class="btn btn-outline" id="aExport">' + ic('download') + 'Export Rekap</button>' + (isSA() ? '<a class="btn btn-dark" href="#/lokasi">' + ic('map-pinned') + 'Lokasi & Geofence</a>' : '<button class="btn btn-dark" id="aGps">' + ic('map') + 'Lokasi Absensi</button>')) +
-      '<div class="tabs" id="aTabs"><button data-tab="scan">' + ic('scan-barcode') + 'Scan Barcode</button><button data-tab="manual">' + ic('clipboard-list') + 'Input Manual</button><button data-tab="riwayat">' + ic('history') + 'Riwayat & Log</button></div>' +
+    el.innerHTML = pageHead('Panel Guru <span>// Absensi & Kehadiran Siswa</span>', 'Manajemen Absensi', 'Pantau kehadiran harian, verifikasi scan QR Code langsung, dan tinjau catatan kehadiran terpadu seluruh siswa.',
+      '<button class="btn btn-outline" id="aExport">' + ic('file-down') + 'Unduh Rekap (PDF/Excel)</button>' + (isSA() ? '<a class="btn btn-dark" href="#/lokasi">' + ic('map-pinned') + 'Lokasi & Geofence</a>' : '<button class="btn btn-dark" id="aGps">' + ic('map') + 'Lokasi Absensi</button>')) +
+      '<div class="tabs" id="aTabs"><button data-tab="scan">' + ic('scan-qr-code') + 'Scan QR Code</button><button data-tab="manual">' + ic('clipboard-list') + 'Input Manual</button><button data-tab="riwayat">' + ic('history') + 'Riwayat & Log</button></div>' +
       '<div id="aScan" class="mt16"></div><div id="aManual" class="mt16" hidden></div><div id="aRiwayat" class="mt16" hidden></div>';
     $$('#aTabs button', el).forEach(function (b) { b.onclick = function () { self.tab(el, b.dataset.tab); }; });
     if ($('#aGps', el)) $('#aGps', el).onclick = function () { petaGeofence(Geo.lokasi(), null); };
-    $('#aExport', el).onclick = function () { self.tab(el, 'riwayat'); setTimeout(function () { self.exportRiwayat(); }, 50); };
+    $('#aExport', el).onclick = function () { LapBerkas.buka({ jenis: 'absensi', kelas_id: self.st.kelas || self.st.rKelas || '' }); };   // v3.1: rekap resmi PDF/Excel (log mentah CSV tetap di tab Riwayat)
     this.buildScan(el);
   },
   show: function (el) { this.tab(el, this.st.tab); },
@@ -195,10 +210,10 @@ registerPage('guru', 'absensi', {
     var st = this.st, self = this;
     $('#aScan', el).innerHTML = '<div class="card"><div class="toolbar"><div class="field"><label class="lbl">Rekap Kelas</label><select class="sel" id="scKelas"></select></div><div class="field"><label class="lbl">Tanggal</label><div class="inp-ic">' + ic('calendar') + '<input class="inp" value="Hari ini — ' + esc(tglIndo(todayStr(), true)) + '" readonly></div></div>' +
       '<div class="field"><label class="lbl">Sesi / Mapel (opsional)</label><input class="inp" id="scSesi" placeholder="Jam ke-1 • Matematika"></div><button class="btn btn-dark" id="scSync">' + ic('refresh-cw') + 'Load / Sync</button></div></div>' +
-      '<div class="grid g-main mt16"><div class="card card-p"><div class="scan-box" id="scBox"><video id="scVideo" muted playsinline></video><div class="grid-bg"></div><div class="frame"><i></i><i></i><i></i><i></i></div><div class="laser" id="scLaser" hidden></div><span class="tl off" id="scLive">KAMERA MATI</span><span class="tr2" id="scMode">' + ic('video') + ' Siap</span><div class="hint">Arahkan kartu barcode ID siswa / QR Code</div>' +
-      '<div class="foot"><span>' + ic('cctv') + 'Kamera belakang</span><span id="scGps">' + ic('map-pin') + 'GPS belum aktif</span><span>' + ic('dot') + 'Auto-Detect: ON</span></div></div>' +
+      '<div class="grid g-main mt16"><div class="card card-p"><div class="scan-box qr" id="scBox"><video id="scVideo" muted playsinline></video><div class="grid-bg"></div><div class="frame"><i></i><i></i><i></i><i></i></div><div class="laser" id="scLaser" hidden></div><span class="tl off" id="scLive">KAMERA MATI</span><span class="tr2" id="scMode">' + ic('video') + ' Siap</span><div class="hint">Arahkan QR Code kartu siswa (cetak / layar HP) ke kotak</div>' +
+      '<div class="foot"><span>' + ic('cctv') + 'Kamera belakang</span><span id="scGps">' + ic('map-pin') + 'GPS belum aktif</span><span id="scAlat">' + ic('scan-qr-code') + 'Alat scan USB/Bluetooth: siap</span></div></div>' +
       '<div class="grid mt16" style="grid-template-columns:minmax(0,1fr) auto;gap:12px"><button class="btn btn-dark btn-lg" id="scStart">' + ic('play', 'amber') + 'START SCANNER (AKTIFKAN KAMERA)</button><button class="btn btn-soft btn-lg" id="scStop">' + ic('circle-stop') + 'STOP</button></div>' +
-      '<form class="row mt12" id="scManual"><div class="inp-ic grow">' + ic('keyboard') + '<input class="inp mono" id="scCode" placeholder="Ketik / scan USB: ID-20230101 lalu Enter" autocomplete="off"></div><button class="btn btn-outline">Catat</button></form>' +
+      '<form class="row mt12" id="scManual"><div class="inp-ic grow">' + ic('keyboard') + '<input class="inp mono" id="scCode" placeholder="Ketik ID / pakai alat scan QR: ID-20230101 lalu Enter" autocomplete="off"></div><button class="btn btn-outline">Catat</button></form>' +
       (DEMO ? '<label class="chk small mt12"><input type="checkbox" id="scSim" ' + (st.simulasi ? 'checked' : '') + '> Mode demo: simulasikan GPS guru berada di titik sekolah</label>' : '') +
       '<div id="scLast"></div></div>' +
       '<div class="card"><div class="card-h"><div class="grow"><h3>Scan Terbaru Hari Ini</h3><p>Aliran kehadiran real-time</p></div><span class="pill" id="scPct"></span></div><div class="card-b"><div class="grid g4" id="scStat" style="gap:8px;background:var(--surface-3);border-radius:10px;padding:12px"></div><div id="scList" class="mt12"></div></div></div></div>';
@@ -209,6 +224,29 @@ registerPage('guru', 'absensi', {
     $('#scManual', el).onsubmit = function (e) { e.preventDefault(); var v = $('#scCode', el).value.trim(); if (v) { self.onScan(el, v); $('#scCode', el).value = ''; } };
     if ($('#scSim', el)) $('#scSim', el).onchange = function () { st.simulasi = this.checked; self.gpsLabel(el); };
     this.gpsLabel(el);
+    this.pasangAlatScan(el);
+  },
+  /** v3.1: alat scan QR/barcode (USB/Bluetooth, mode keyboard) — ketikan sangat cepat diakhiri Enter langsung
+      dicatat walau kursor tidak berada di kolom ketik. Ketikan manusia (lambat) diabaikan. */
+  pasangAlatScan: function (el) {
+    this._alatEl = el;
+    if (this._alat) return; this._alat = true;
+    var self = this, buf = '', last = 0;
+    document.addEventListener('keydown', function (e) {
+      var el = self._alatEl, box = el && $('#aScan', el);
+      if (!box || box.hidden || !el.isConnected || el.offsetParent === null || document.querySelector('.overlay')) { buf = ''; return; }
+      var t = e.target, tag = t && t.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (t && t.isContentEditable)) return;   // kolom #scCode menangani sendiri
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      var now = Date.now();
+      if (now - last > 70) buf = '';
+      last = now;
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        if (buf.length >= 3) { e.preventDefault(); var kode = buf; buf = ''; var lab = $('#scAlat', el); if (lab) { lab.innerHTML = ic('scan-qr-code') + 'Alat scan: ' + esc(kode); } self.onScan(el, kode); }
+        buf = ''; return;
+      }
+      if (e.key && e.key.length === 1) buf += e.key;
+    }, true);
   },
   gpsLabel: function (el) {
     var st = this.st, lab = $('#scGps', el); if (!lab) return;
@@ -229,7 +267,7 @@ registerPage('guru', 'absensi', {
     try {
       var mode = await Scanner.start($('#scVideo', el), function (code) { self.onScan(el, code); });
       $('#scLive', el).className = 'tl'; $('#scLive', el).textContent = 'LIVE FEED'; $('#scLaser', el).hidden = false;
-      $('#scMode', el).innerHTML = ic('video') + (mode === 'native' ? ' Detektor bawaan' : ' ZXing decoder');
+      $('#scMode', el).innerHTML = ic('video') + (mode === 'native' ? ' Detektor QR bawaan' : ' Dekoder QR (ZXing)');
     } catch (e) {
       toast(e && e.name === 'NotAllowedError' ? 'Izin kamera ditolak. Aktifkan izin kamera di browser, atau gunakan kolom ketik/scan USB.' : 'Kamera tidak tersedia: ' + (e.message || e) + '. Gunakan kolom ketik/scan USB.', 'bad');
       $('#scCode', el).focus();
@@ -278,7 +316,7 @@ registerPage('guru', 'absensi', {
     $('#scStat', el).innerHTML = [['HADIR', c.Hadir, ''], ['IZIN', c.Izin, 'amber'], ['SAKIT', c.Sakit, ''], ['ALPHA', c.Alpha, 'red']].map(function (x) { return '<div class="tc"><div class="xs b muted">' + x[0] + '</div><div class="b ' + x[2] + '" style="font-size:22px">' + x[1] + '</div></div>'; }).join('');
     var list = st.pending.filter(function (p) { return !st.kelas || !p.kelas_id || p.kelas_id === st.kelas; }).concat(rows.slice().sort(function (a, b) { return String(b.jam).localeCompare(String(a.jam)); }));
     $('#scList', el).innerHTML = list.length ? list.slice(0, 8).map(function (a, i) { var s = siswaByNIS(a.NIS) || {}, nm = a.nama || s.nama_lengkap || a.NIS; return '<div class="list-i" style="padding:10px 12px"><span class="mono xs muted">' + String(i + 1).padStart(2, '0') + '</span>' + avatar(nm, s.foto_profil_url, 'sm') + '<div class="grow"><b class="ellipsis small">' + esc(nm) + '</b><small>NIS: ' + esc(a.NIS || '-') + ' • ' + esc(kelasNama(a.kelas_id)) + '</small></div><div class="tr"><div class="mono xs">' + esc(String(a.jam).substring(0, 8)) + ' WIB</div>' + (a.status === 'proses' ? '<span class="bdg">' + ic('loader-circle', 'spin') + 'proses</span>' : statusBadge(a.status)) + '</div></div>'; }).join('') +
-      (list.length > 8 ? '<div class="row between mt12 small"><i class="muted">+ ' + (list.length - 8) + ' siswa lainnya telah tercatat</i><a href="#" id="scAll" class="b">Lihat Semua ›</a></div>' : '') : emptyHtml('Belum ada scan hari ini', 'Mulai scanner atau ketik barcode.', 'scan-line');
+      (list.length > 8 ? '<div class="row between mt12 small"><i class="muted">+ ' + (list.length - 8) + ' siswa lainnya telah tercatat</i><a href="#" id="scAll" class="b">Lihat Semua ›</a></div>' : '') : emptyHtml('Belum ada scan hari ini', 'Mulai scanner kamera, pakai alat scan QR, atau ketik ID kartu.', 'scan-line');
     var self = this; if ($('#scAll', el)) $('#scAll', el).onclick = function (e) { e.preventDefault(); self.st.rBulan = todayStr().substring(0, 7); self.tab(el, 'riwayat'); };
   },
   // ------------------------------------------------ MANUAL
@@ -328,7 +366,7 @@ registerPage('guru', 'absensi', {
     if (!box.firstChild) {
       box.innerHTML = '<div class="card"><div class="card-h"><div class="grow"><h3>Riwayat Kehadiran & Log Audit</h3><p>Verifikasi detail dengan metode, koordinat GPS, dan bukti foto.</p></div><div class="row gap12"><button class="btn btn-outline btn-sm" id="rCsv">' + ic('download') + 'Export CSV</button><button class="btn btn-outline btn-sm" id="rPrint">' + ic('printer') + 'Cetak Laporan</button></div></div>' +
         '<div class="toolbar"><div class="field"><select class="sel" id="rKelas"></select></div><div class="field"><input class="inp" type="month" id="rBulan" value="' + esc(st.rBulan) + '"></div><div class="field"><select class="sel" id="rStatus"><option value="">Semua Status</option><option>Hadir</option><option>Izin</option><option>Sakit</option><option>Alpha</option><option value="telat">Terlambat</option></select></div>' +
-        '<div class="field"><select class="sel" id="rMetode"><option value="">Semua Metode</option><option value="barcode">Barcode</option><option value="selfie">Selfie GPS</option><option value="lokasi">Lokasi GPS</option><option value="manual">Manual</option></select></div><div class="field search"><div class="inp-ic">' + ic('search') + '<input class="inp" id="rQ" placeholder="Cari siswa atau NIS…"></div></div></div><div id="rTable"></div></div>';
+        '<div class="field"><select class="sel" id="rMetode"><option value="">Semua Metode</option><option value="barcode">QR Code</option><option value="selfie">Selfie GPS</option><option value="lokasi">Lokasi GPS</option><option value="manual">Manual</option></select></div><div class="field search"><div class="inp-ic">' + ic('search') + '<input class="inp" id="rQ" placeholder="Cari siswa atau NIS…"></div></div></div><div id="rTable"></div></div>';
       $('#rKelas', box).innerHTML = kelasOpts(st.rKelas, 'Semua Kelas');
       $('#rKelas', box).onchange = function () { st.rKelas = this.value; st.rPage = 1; self.renderRiwayat(el); };
       $('#rBulan', box).onchange = function () { st.rBulan = this.value || todayStr().substring(0, 7); st.rRows = null; st.rPage = 1; self.loadRiwayat(el); };

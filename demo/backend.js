@@ -2,7 +2,7 @@
 // ==== Kode.gs ====
 /**
  * =====================================================================
- *  SIAKAD SISWA v3.0 — Backend REST API (Google Apps Script)
+ *  SIAKAD SISWA v3.1 — Backend REST API (Google Apps Script)
  *  File 1/13: Kode.gs — konfigurasi, pintu rahasia, router & peran,
  *             auth, database, cache berversi, antrean, warmup, setup
  *
@@ -24,7 +24,7 @@
 // ---------------------------------------------------------------------
 var APP = {
   NAME: 'SIAKAD SISWA',
-  VERSION: '3.0.0',
+  VERSION: '3.1.0',
   TZ: 'Asia/Jakarta',
   SCHEMA_VERSION: 3,
   TOKEN_TTL_MS: 8 * 3600 * 1000,          // PRD US-01: sesi 8 jam
@@ -401,6 +401,7 @@ function dispatch_(body) {
       if (out && out.success) {
         nq = simpanNQ_();                                     // notifikasi → antrean cache (bukan tulis sheet)
         bump_('adm', true);                                   // semua cache menu admin basi
+        extSemua_('setelahTulis', r.name, ctx, data, out);    // v3.1: cache LMS per kursus/pengguna ikut basi
         if (k) { var s = JSON.stringify(redaksi_(out)); if (s.length < 90000) c.put(k, s, 21600); }   // R6: tanpa sandi
       } else _NQ = [];
       return out;
@@ -457,9 +458,9 @@ function flushPendingWrites_() { try { SpreadsheetApp.flush(); } catch (e) {} }
 function apiBatch(ctx, d) {
   var out = {};
   (d.calls || []).slice(0, 10).forEach(function (c) {
-    var r = routes_()[c.action];
-    if (!r || r.write || c.action === 'batch' || r.auth === 'public' || !authorized_(r, ctx)) { out[c.action] = fail_('Tidak diizinkan dalam batch.'); return; }
-    try { out[c.action] = runRoute_(r, ctx, c.data || {}); } catch (e) { out[c.action] = fail_(e.message); }
+    var r = routes_()[c.action], k = c.k ? String(c.k).substring(0, 80) : c.action;   // v3.1: kunci hasil (aksi sama, data beda)
+    if (!r || r.write || c.action === 'batch' || r.auth === 'public' || !authorized_(r, ctx)) { out[k] = fail_('Tidak diizinkan dalam batch.'); return; }
+    try { out[k] = runRoute_(r, ctx, c.data || {}); } catch (e) { out[k] = fail_(e.message); }
   });
   return ok_(out);
 }
@@ -1099,6 +1100,7 @@ function warmCaches_(scope) {
     step('absensi', absenIndex_);
     step('bootGuru', function () { cached_('bootG_' + versKey_(), 600, buildGuruBootstrap_); });
   }
+  extSemua_('warm', step, scope);                            // v3.1: modul tambahan ikut dipanaskan (mis. struktur kursus LMS)
   c.put('warm_last', JSON.stringify({ at: nowIso_(), scope: scope, ms: Date.now() - t0, langkah: langkah }), 21600);
   return langkah.join(',');
 }
@@ -4635,12 +4637,13 @@ function lmsStruktur_(kid) {
     s = { kursus: k,
       seksi: DB.filter('KursusSeksi', f).sort(function (a, b) { return num_(a.no) - num_(b.no); }),
       modul: DB.filter('KursusModul', f).sort(function (a, b) { return num_(a.urutan) - num_(b.urutan); }),
-      grup: DB.filter('KursusGrup', f), grouping: DB.filter('KursusGrouping', f), peserta: DB.filter('KursusPeserta', f) };
+      grup: DB.filter('KursusGrup', f), grouping: DB.filter('KursusGrouping', f), peserta: DB.filter('KursusPeserta', f),
+      nilaiItem: SCHEMA.NilaiItem ? DB.filter('NilaiItem', f) : [], nilaiKat: SCHEMA.NilaiKategori ? DB.filter('NilaiKategori', f) : [] };   // v3.1
     CacheX.put(key, s, 3600);
   }
   return (_LMS['s' + kid] = s);
 }
-function lmsSegarkan_() { bump_('lms'); Object.keys(_LMS).forEach(function (k) { if (k.charAt(0) === 's') delete _LMS[k]; }); }
+function lmsSegarkan_() { bump_('lms'); Object.keys(_LMS).forEach(function (k) { if (k.charAt(0) === 's' || k === 'ks' || k === 'm2k' || k.indexOf('agg') === 0) delete _LMS[k]; }); }
 
 /** Peran pengguna di kursus: admin (Super Admin) | pengajar | siswa | null */
 function lmsPeran_(ctx, s) {
@@ -4678,7 +4681,7 @@ function lmsAkses_(ctx, kid, butuh) {
 }
 /** Akses modul. Siswa ditolak bila modul tersembunyi / terkunci syarat (dicek di server). */
 function lmsAksesModul_(ctx, mid, butuh) {
-  var m0 = DB.find('KursusModul', 'modul_id', mid);
+  var m0 = lmsModulKursus_(mid);                                   // v3.1: dari cache berversi
   if (!m0) return { err: fail_('Aktivitas tidak ditemukan atau sudah dihapus.') };
   var a = lmsAkses_(ctx, m0.kursus_id, butuh);
   if (a.err) return a;
@@ -4699,11 +4702,9 @@ function lmsAksesModul_(ctx, mid, butuh) {
 function lmsStatus_(s, uid) {
   var kid = s.kursus.kursus_id, mk = 'st' + kid + '|' + uid;
   if (_LMS[mk]) return _LMS[mk];
-  var selesai = {}, nilai = {};
-  DB.all('Penyelesaian').forEach(function (r) { if (r.kursus_id === kid && r.user_id === uid) selesai[r.modul_id] = r.status; });
-  if (SCHEMA.NilaiEntri) DB.all('NilaiEntri').forEach(function (r) {
-    if (r.kursus_id === kid && r.user_id === uid && r.nilai !== '') { var mx = num_(r.nilai_maks, 100) || 100; nilai[r.item_ref] = round1_(num_(r.nilai) / mx * 100); }
-  });
+  var selesai = {}, nilai = {}, rk = lmsRekamUser_(uid);          // v3.1: cache per pengguna
+  Object.keys(rk.s[kid] || {}).forEach(function (mid) { selesai[mid] = rk.s[kid][mid]; });
+  Object.keys(rk.n[kid] || {}).forEach(function (ref) { var r = rk.n[kid][ref]; if (r.nilai !== '') { var mx = num_(r.maks, 100) || 100; nilai[ref] = round1_(num_(r.nilai) / mx * 100); } });
   var grup = s.grup.filter(function (g) { return lmsIds_(g.anggota).indexOf(uid) > -1; }).map(function (g) { return g.grup_id; });
   var grouping = s.grouping.filter(function (gg) { return lmsIds_(gg.grup_ids).some(function (id) { return grup.indexOf(id) > -1; }); }).map(function (gg) { return gg.grouping_id; });
   return (_LMS[mk] = { uid: uid, selesai: selesai, nilai: nilai, grup: grup, grouping: grouping });
@@ -4764,12 +4765,15 @@ function lmsTandai_(kid, mid, uid, peristiwa, persen) {
   return lmsSimpanSelesai_(kid, mid, uid, status, peristiwa);
 }
 function lmsSimpanSelesai_(kid, mid, uid, status, sumber) {
+  var cek = (lmsRekamUser_(uid).s[kid] || {})[mid];                 // v3.1: status sama -> tanpa baca/tulis sheet
+  if (cek === status || (cek === 'lulus' && status === 'gagal')) return cek;
   var ada = DB.filter('Penyelesaian', function (r) { return r.kursus_id === kid && r.modul_id === mid && r.user_id === uid; })[0];
   if (ada && ada.status === status) return status;
   if (ada && ada.status === 'lulus' && status === 'gagal') return 'lulus';                 // lulus tidak turun
   if (ada) DB.updateBatch('Penyelesaian', 'penyelesaian_id', [{ penyelesaian_id: ada.penyelesaian_id, status: status, sumber: sumber, waktu: nowIso_() }]);
   else DB.appendBatch('Penyelesaian', [{ penyelesaian_id: reserveIds_('Penyelesaian', 1)[0], kursus_id: kid, modul_id: mid, user_id: uid, status: status, sumber: sumber, waktu: nowIso_() }]);
   delete _LMS['st' + kid + '|' + uid]; delete _LMS['vis' + kid + '|' + uid];
+  lmsUserBasi_(uid, kid);                                           // v3.1
   if (mid.indexOf('KURSUS:') !== 0) lmsCekLulus_(kid, uid);
   return status;
 }
@@ -4777,6 +4781,7 @@ function lmsHapusSelesai_(kid, mid, uid) {
   var ada = DB.filter('Penyelesaian', function (r) { return r.kursus_id === kid && r.modul_id === mid && r.user_id === uid; });
   if (ada.length) DB.deleteWhere('Penyelesaian', 'penyelesaian_id', ada.map(function (r) { return r.penyelesaian_id; }));
   delete _LMS['st' + kid + '|' + uid]; delete _LMS['vis' + kid + '|' + uid];
+  lmsUserBasi_(uid, kid);                                           // v3.1
 }
 /** Modul yang dilacak penyelesaiannya */
 function lmsDilacak_(s) { return s.modul.filter(function (m) { return m.tampil !== 'TIDAK' && lmsAturanSelesai_(m).mode !== 'tidak'; }); }
@@ -4809,7 +4814,7 @@ function lmsKursusRingkas_(k, extra) {
 }
 function apiLmsKursusList(ctx, d) {
   var uid = ctx.session.uid, sa = ctx.session.role === 'superadmin', out = [];
-  var semua = DB.all('Kursus');
+  var semua = lmsKursusSemua_();                                    // v3.1: cache berversi
   semua.forEach(function (k) {
     var s = lmsStruktur_(k.kursus_id), p = lmsPeran_(ctx, s);
     if (!p || (p === 'admin' && !sa)) return;
@@ -4901,7 +4906,10 @@ function lmsHapusKolom_(sheet, col, vals) {
   if (!SCHEMA[sheet]) return 0;
   var set = {}; (Array.isArray(vals) ? vals : [vals]).forEach(function (v) { set[String(v)] = 1; });
   var key = SCHEMA[sheet].key, ids = DB.filter(sheet, function (r) { return set[String(r[col])]; }).map(function (r) { return r[key]; });
-  return ids.length ? DB.deleteWhere(sheet, key, ids) : 0;
+  if (!ids.length) return 0;
+  var jml = DB.deleteWhere(sheet, key, ids);
+  if (/^(Penyelesaian|NilaiEntri)$/.test(sheet)) bump_('lmsr', true);   // v3.1: setelah dihapus
+  return jml;
 }
 function apiLmsKursusHapus(ctx, d) {
   var a = lmsAkses_(ctx, d.kursus_id, 'kelola'); if (a.err) return a.err;
@@ -4937,9 +4945,7 @@ function apiLmsKursusGet(ctx, d) {
     grup: s.grup.map(function (g) { return { grup_id: g.grup_id, nama: g.nama, jml: lmsIds_(g.anggota).length }; }),
     grouping: s.grouping.map(function (g) { return { grouping_id: g.grouping_id, nama: g.nama, grup_ids: lmsIds_(g.grup_ids) }; }) };
   if (a.kelola) {
-    var siswa = lmsSiswa_(s), perlu = typeof lmsPerluDinilai_ === 'function' ? lmsPerluDinilai_(s) : {};
-    var selesaiCnt = {};
-    DB.all('Penyelesaian').forEach(function (r) { if (r.kursus_id === kid && r.status !== 'gagal') selesaiCnt[r.modul_id] = (selesaiCnt[r.modul_id] || 0) + 1; });
+    var siswa = lmsSiswa_(s), agg = lmsAgregatGuru_(s), perlu = agg.perlu, selesaiCnt = agg.selesai;   // v3.1: cache per kursus
     lmsLog_(ctx, 'aksi', 'kursus', kid, 0, 'kelola kursus');
     return ok_(Object.assign(base, {
       seksi: s.seksi.map(function (sk) { return { seksi_id: sk.seksi_id, no: num_(sk.no), judul: sk.judul, ringkasan: sk.ringkasan, tampil: sk.tampil || 'YA', syarat: lmsJson_(sk.syarat, null) }; }),
@@ -5328,7 +5334,7 @@ lmsKait_('demoClear', function () {
     if (last > 1) sh.getRange(2, 1, last - 1, sh.getLastColumn()).clearContent();
     invalidateRows_(n);
   });
-  bump_('lms');
+  bump_('lms'); bump_('lmsr');                                    // v3.1: cache baris siswa ikut basi
 });
 
 /**
@@ -5352,6 +5358,84 @@ function setupV30() {
   Logger.log('🔐 Kunci enkripsi pesan: ' + (prop_('ENC_KEY') ? 'ada (Script Properties)' : 'BELUM'));
   Logger.log('✅ Selesai' + (baruDemo ? '' : '') + '. Lanjutkan: Deploy → Manage deployments → ✏️ Edit → Version: New version → Deploy.');
   if (typeof cekPerforma === 'function') cekPerforma();
+}
+
+// =====================================================================
+// v3.1 — TURBO LMS (gas-scale-turbo): cache berversi per pengguna & per kursus
+//   • Status siswa (Penyelesaian + NilaiEntri) dibaca dari cache MILIK PENGGUNA ITU
+//     → membuka kursus/aktivitas tidak lagi membaca 2 sheet besar seluruh sekolah.
+//   • Hitungan guru (perlu dinilai, jumlah selesai) di-cache per kursus.
+//   • Peta modul→kursus & daftar kursus di-cache (ikut versi 'lms').
+//   Kunci memuat versi → data lama otomatis tak terpakai; tidak ada sheet yang diubah.
+// =====================================================================
+/** Baris Penyelesaian & NilaiEntri satu pengguna (semua kursus), ringkas, dari cache berversi */
+function lmsRekamUser_(uid) {
+  uid = String(uid || '');
+  if (_LMS['rk' + uid]) return _LMS['rk' + uid];
+  var key = 'lmsRk_' + uid + '_' + ver_('lmsr') + '_' + ver_('lmsu_' + uid), rk = CacheX.get(key);   // tidak ikut 'lms': edit struktur guru tidak membuat cache siswa dingin
+  if (!rk) {
+    rk = { s: {}, n: {} };
+    DB.all('Penyelesaian').forEach(function (r) { if (r.user_id === uid) (rk.s[r.kursus_id] = rk.s[r.kursus_id] || {})[r.modul_id] = r.status; });
+    if (SCHEMA.NilaiEntri) DB.all('NilaiEntri').forEach(function (e) {
+      if (e.user_id === uid) (rk.n[e.kursus_id] = rk.n[e.kursus_id] || {})[e.item_ref] = { nilai: e.nilai === '' ? '' : num_(e.nilai), maks: num_(e.nilai_maks, 100), timpa: e.timpa === 'YA', catatan: e.catatan, sumber: e.sumber, waktu: e.waktu };
+    });
+    CacheX.put(key, rk, 21600);
+  }
+  return (_LMS['rk' + uid] = rk);
+}
+/** Tandai cache pengguna (& hitungan guru kursus itu) basi — dipanggil setiap menulis Penyelesaian/NilaiEntri */
+function lmsUserBasi_(uid, kid) {
+  if (uid) { bump_('lmsu_' + uid, true); delete _LMS['rk' + uid]; delete _LMS['st' + kid + '|' + uid]; delete _LMS['vis' + kid + '|' + uid]; }
+  if (kid) lmsAggBasi_(kid);
+}
+function lmsAggBasi_(kid) { if (kid) { bump_('lmsg_' + kid, true); delete _LMS['agg' + kid]; } }
+/** Peta modul_id → baris modul (cache, ikut versi 'lms'). Fallback ke sheet bila belum ada. */
+function lmsPetaModul_() {
+  return _LMS.m2k || (_LMS.m2k = cached_('lmsM2K_' + ver_('lms'), 3600, function () {
+    var o = {}; DB.all('KursusModul').forEach(function (m) { o[m.modul_id] = m.kursus_id; }); return o;
+  }));
+}
+function lmsModulKursus_(mid) {
+  var kid = lmsPetaModul_()[mid];
+  if (kid) { var s = lmsStruktur_(kid), m = s && s.modul.filter(function (x) { return x.modul_id === mid; })[0]; if (m) return m; }
+  return DB.find('KursusModul', 'modul_id', mid);
+}
+function lmsKursusSemua_() { return _LMS.ks || (_LMS.ks = cached_('lmsKS_' + ver_('lms'), 3600, function () { return DB.all('Kursus'); })); }
+/** Hitungan guru per kursus: perlu dinilai & jumlah selesai per modul */
+function lmsAgregatGuru_(s) {
+  var kid = s.kursus.kursus_id;
+  if (_LMS['agg' + kid]) return _LMS['agg' + kid];
+  return (_LMS['agg' + kid] = cached_('lmsAgg_' + kid + '_' + ver_('lms') + '_' + ver_('lmsg_' + kid) + '_' + ver_('lmsgAll'), 21600, function () {
+    var perlu = typeof lmsPerluDinilai_ === 'function' ? lmsPerluDinilai_(s) : {}, selesai = {};
+    DB.all('Penyelesaian').forEach(function (r) { if (r.kursus_id === kid && r.status !== 'gagal') selesai[r.modul_id] = (selesai[r.modul_id] || 0) + 1; });
+    return { perlu: perlu, selesai: selesai };
+  }));
+}
+/** Setelah aksi TULIS LMS sukses → hitungan guru kursus terkait basi (kiriman, nilai, forum, glosarium, dst.) */
+var LMS_AKSI_TULIS = /^(lms|kuis|tugas|forum|wiki|glos|ws|pel|ub|kv|nilai|soal|rubrik)\./;
+lmsKait_('setelahTulis', function (aksi, ctx, d, out) {
+  if (!LMS_AKSI_TULIS.test(aksi)) return;
+  d = d || {};
+  var kid = d.kursus_id || '';
+  if (!kid && d.modul_id) { var m = lmsModulKursus_(d.modul_id); kid = m ? m.kursus_id : ''; }
+  if (kid) lmsAggBasi_(kid); else bump_('lmsgAll', true);           // tidak diketahui kursusnya → semua hitungan guru basi
+  // tulis-tembus: struktur kursus yang baru diubah guru langsung dibangun ulang & di-cache di sini
+  // (di dalam lock, data segar) → siswa berikutnya tidak menunggu pembacaan ulang sheet
+  if (/^lms\./.test(aksi)) { try { lmsPetaModul_(); lmsKursusSemua_(); if (kid) lmsStruktur_(kid); } catch (e) { console.error('lms warm: ' + e.message); } }
+});
+/** Warmup (trigger 1 menit & ?w=): struktur kursus aktif + peta modul tetap hangat di cache */
+lmsKait_('warm', function (step, scope) {
+  if (scope === 'pub') return;
+  step('lms', function () { lmsPetaModul_(); lmsKursusSemua_().forEach(function (k) { if (k.status === 'Aktif') lmsStruktur_(k.kursus_id); }); });
+});
+/**
+ * Jalankan dari editor HANYA bila data LMS diubah LANGSUNG di spreadsheet (bukan lewat aplikasi).
+ * Semua cache LMS (struktur, progres & nilai siswa, hitungan guru) dibangun ulang pada permintaan berikutnya.
+ * Tidak menulis ke spreadsheet.
+ */
+function segarkanCacheLms() {
+  resetMemo_(); bump_('lms'); bump_('lmsr'); bump_('lmsgAll'); bump_('adm');
+  Logger.log('✅ Cache LMS disegarkan. Perubahan langsung di spreadsheet kini terbaca oleh guru & siswa.');
 }
 
 if (typeof pasangEkstensi_ === 'function' && typeof SCHEMA !== 'undefined') pasangEkstensi_();
@@ -5672,6 +5756,7 @@ function kuisFinalisasi_(a, p, jawaban, otomatis) {
     durasi_detik: res.durasi, jawaban: JSON.stringify(jawaban).substring(0, 45000), rincian: JSON.stringify(rincian), nilai: res.nilaiRaw, nilai_maks: maks,
     status: manual ? 'perlu_dinilai' : 'selesai', terlambat: terlambat || otomatis ? 'YA' : 'TIDAK', dinilai_oleh: '', dinilai_pada: '' }]);
   res.percobaan_id = id;
+  if (typeof lmsAggBasi_ === 'function') lmsAggBasi_(a.m.kursus_id);   // v3.1: hitungan "perlu dinilai" guru
   kuisPerbaruiNilai_(a, p.u);
   if (typeof lmsTandai_ === 'function') lmsTandai_(a.m.kursus_id, a.m.modul_id, p.u, 'kirim');
   return res;
@@ -6556,6 +6641,7 @@ function nilaiCatat_(kid, ref, uid, nilai, maks, sumber) {
   if (ada) { row.entri_id = ada.entri_id; DB.updateBatch('NilaiEntri', 'entri_id', [row]); }
   else { row.entri_id = reserveIds_('NilaiEntri', 1)[0]; row.timpa = 'TIDAK'; row.catatan = ''; row.oleh = ''; DB.appendBatch('NilaiEntri', [row]); }
   if (typeof _LMS !== 'undefined') delete _LMS['st' + kid + '|' + uid];
+  if (typeof lmsUserBasi_ === 'function') lmsUserBasi_(uid, kid);   // v3.1
   return true;
 }
 function nilaiItems_(s) {
@@ -6564,13 +6650,13 @@ function nilaiItems_(s) {
     if (!LMS_DINILAI[m.tipe] || num_(m.nilai_maks) <= 0) return;
     items.push({ ref: m.modul_id, nama: m.judul, tipe: m.tipe, kategori_id: m.kategori_id || '', maks: num_(m.nilai_maks), bobot: num_(m.bobot, 1), otomatis: true, seksi_id: m.seksi_id, urutan: num_(m.urutan) });
   });
-  DB.filter('NilaiItem', function (i) { return i.kursus_id === kid; }).forEach(function (i) {
+  (s.nilaiItem || DB.filter('NilaiItem', function (i) { return i.kursus_id === kid; })).forEach(function (i) {   // v3.1: dari struktur cache
     items.push({ ref: i.item_id, nama: i.nama, tipe: 'manual', kategori_id: i.kategori_id || '', maks: num_(i.nilai_maks, 100) || 100, bobot: num_(i.bobot, 1), otomatis: false, urutan: 1000 + num_(i.urutan) });
   });
   var urutSeksi = {}; s.seksi.forEach(function (x) { urutSeksi[x.seksi_id] = num_(x.no); });
   return items.sort(function (a, b) { return (a.otomatis ? urutSeksi[a.seksi_id] || 0 : 999) - (b.otomatis ? urutSeksi[b.seksi_id] || 0 : 999) || a.urutan - b.urutan; });
 }
-function nilaiKategori_(kid) { return DB.filter('NilaiKategori', function (c) { return c.kursus_id === kid; }).sort(function (a, b) { return num_(a.urutan) - num_(b.urutan); }); }
+function nilaiKategori_(kid) { var st = typeof lmsStruktur_ === 'function' ? lmsStruktur_(kid) : null; return (st && st.nilaiKat ? st.nilaiKat.slice() : DB.filter('NilaiKategori', function (c) { return c.kursus_id === kid; })).sort(function (a, b) { return num_(a.urutan) - num_(b.urutan); }); }
 /** Hitung total (0–100) dari peta nilai {ref: {nilai, maks}} */
 function nilaiHitung_(items, kats, peta) {
   var defs = kats.map(function (c) { return { id: c.kategori_id, bobot: num_(c.bobot), buang: num_(c.buang_terendah) }; });
@@ -6598,7 +6684,7 @@ function nilaiPetaUser_(kid) {
 }
 /** Total nilai kursus seorang siswa (dipakai kriteria kelulusan) */
 function lmsTotalSiswa_(s, uid) {
-  var kid = s.kursus.kursus_id, peta = (nilaiPetaUser_(kid)[uid]) || {};
+  var kid = s.kursus.kursus_id, peta = typeof lmsRekamUser_ === 'function' ? (lmsRekamUser_(uid).n[kid] || {}) : ((nilaiPetaUser_(kid)[uid]) || {});   // v3.1
   return nilaiHitung_(nilaiItems_(s), nilaiKategori_(kid), peta).total;
 }
 // ---------------------------------------------------------------------
@@ -6699,6 +6785,7 @@ function apiNilaiItemSave(ctx, d) {
   var row = { nama: nama, nilai_maks: Math.max(1, Math.min(1000, num_(d.nilai_maks, 100))), kategori_id: lmsTeks_(d.kategori_id, 20), bobot: Math.max(0, num_(d.bobot, 1)) };
   if (d.item_id) { row.item_id = d.item_id; DB.updateBatch('NilaiItem', 'item_id', [row]); }
   else { row.item_id = reserveIds_('NilaiItem', 1)[0]; row.kursus_id = a.s.kursus.kursus_id; row.urutan = DB.filter('NilaiItem', function (i) { return i.kursus_id === row.kursus_id; }).length + 1; row.dibuat_pada = nowIso_(); DB.appendBatch('NilaiItem', [row]); }
+  lmsSegarkan_();                                                  // v3.1: metadata nilai ada di cache struktur
   return ok_({ item_id: row.item_id }, 'Item nilai "' + nama + '" disimpan.');
 }
 function apiNilaiItemHapus(ctx, d) {
@@ -6706,6 +6793,7 @@ function apiNilaiItemHapus(ctx, d) {
   var it = DB.find('NilaiItem', 'item_id', d.item_id); if (!it || it.kursus_id !== a.s.kursus.kursus_id) return fail_('Item tidak ditemukan.');
   lmsHapusKolom_('NilaiEntri', 'item_ref', it.item_id);
   DB.deleteWhere('NilaiItem', 'item_id', [it.item_id]);
+  lmsSegarkan_();                                                  // v3.1
   return ok_(null, 'Item nilai dihapus.');
 }
 /** Simpan nilai manual: d.entri = [{uid, ref, nilai ('' = kosongkan), catatan, lepasTimpa}] */
@@ -6730,6 +6818,7 @@ function apiNilaiEntriSave(ctx, d) {
   if (ins.length) { var ids = reserveIds_('NilaiEntri', ins.length); ins.forEach(function (r, x) { r.entri_id = ids[x]; }); DB.appendBatch('NilaiEntri', ins); }
   DB.updateBatch('NilaiEntri', 'entri_id', upd);
   if (typeof _LMS !== 'undefined') Object.keys(_LMS).forEach(function (k) { if (k.indexOf('st') === 0) delete _LMS[k]; });
+  (d.entri || []).forEach(function (e) { if (siswa[e.uid] && typeof lmsUserBasi_ === 'function') lmsUserBasi_(e.uid, kid); });   // v3.1
   lmsSiswa_(s).forEach(function (u) { if ((d.entri || []).some(function (e) { return e.uid === u; })) lmsCekLulus_(kid, u); });
   var res = ok_(null, n + ' nilai disimpan di buku nilai.');
   res.auditDetail = 'Buku nilai ' + kid + ': ' + n + ' entri manual';
@@ -7289,10 +7378,12 @@ function apiLogAktivitas(ctx, d) {
     durasiTugas: kamDurasiTugas_(dari, sampai, d.uid) });
 }
 /** Durasi pengerjaan kuis & tugas (dari data aktivitas) */
+/** v3.1: tanggal lokal (WIB) dari ISO — percobaan kuis disimpan dalam UTC, jadi 00.00–07.00 WIB tidak lagi jatuh ke hari kemarin */
+function kamTglLokal_(iso) { if (!iso) return ''; var d = new Date(iso); return isNaN(d.getTime()) ? String(iso).substring(0, 10) : Utilities.formatDate(d, APP.TZ, 'yyyy-MM-dd'); }
 function kamDurasiTugas_(dari, sampai, uid) {
   var out = [], judul = {}; DB.all('KursusModul').forEach(function (m) { judul[m.modul_id] = m.judul; });
-  if (SCHEMA.KuisPercobaan) DB.all('KuisPercobaan').forEach(function (p) { var t = String(p.selesai).substring(0, 10); if (t >= dari && t <= sampai && (!uid || p.user_id === uid)) out.push({ jenis: 'Kuis', judul: judul[p.modul_id] || p.modul_id, uid: p.user_id, nama: lmsNama_(p.user_id), durasi_detik: num_(p.durasi_detik), waktu: p.selesai, nilai: p.nilai_maks ? round1_(num_(p.nilai) / num_(p.nilai_maks) * 100) : null }); });
-  if (SCHEMA.TugasKirim) DB.all('TugasKirim').forEach(function (k) { var t = String(k.dikirim_pada).substring(0, 10); if (k.dikirim_pada && t >= dari && t <= sampai && (!uid || k.user_id === uid)) out.push({ jenis: 'Tugas', judul: judul[k.modul_id] || k.modul_id, uid: k.user_id, nama: lmsNama_(k.user_id), durasi_detik: num_(k.durasi_detik), waktu: k.dikirim_pada, nilai: k.nilai === '' ? null : num_(k.nilai) }); });
+  if (SCHEMA.KuisPercobaan) DB.all('KuisPercobaan').forEach(function (p) { var t = kamTglLokal_(p.selesai); if (t >= dari && t <= sampai && (!uid || p.user_id === uid)) out.push({ jenis: 'Kuis', judul: judul[p.modul_id] || p.modul_id, uid: p.user_id, nama: lmsNama_(p.user_id), durasi_detik: num_(p.durasi_detik), waktu: p.selesai, nilai: p.nilai_maks ? round1_(num_(p.nilai) / num_(p.nilai_maks) * 100) : null }); });
+  if (SCHEMA.TugasKirim) DB.all('TugasKirim').forEach(function (k) { var t = kamTglLokal_(k.dikirim_pada); if (k.dikirim_pada && t >= dari && t <= sampai && (!uid || k.user_id === uid)) out.push({ jenis: 'Tugas', judul: judul[k.modul_id] || k.modul_id, uid: k.user_id, nama: lmsNama_(k.user_id), durasi_detik: num_(k.durasi_detik), waktu: k.dikirim_pada, nilai: k.nilai === '' ? null : num_(k.nilai) }); });
   return out.sort(function (a, b) { return String(b.waktu).localeCompare(String(a.waktu)); }).slice(0, 300);
 }
 
@@ -7468,6 +7559,159 @@ EXT.routes.push(function (add) {
   add('brand.simpan', apiBrandSimpan, 'sa', true, { audit: true });
 });
 
+if (typeof pasangEkstensi_ === 'function' && typeof SCHEMA !== 'undefined') pasangEkstensi_();
+
+;
+// ==== Laporan.gs ====
+/**
+ * =====================================================================
+ *  SIAKAD SISWA v3.1 — Laporan.gs : Data Rekap Absensi & Nilai (berkas PDF/Excel)
+ *  Server hanya MENGHITUNG & mengirim data rekap (1 kali baca sheet, di-cache).
+ *  Berkas PDF (jsPDF) & Excel .xlsx (ExcelJS) dibuat di browser → tanpa kuota Drive,
+ *  tanpa menulis apa pun ke spreadsheet. Logika hari efektif sama dengan menu Laporan:
+ *  hari efektif = tanggal kelas itu punya catatan absensi; tanpa catatan = Alpha.
+ * =====================================================================
+ */
+var EXT = (typeof EXT !== 'undefined' && EXT) || { schema: {}, seed: [], routes: [], tick: [], reset: [], hooks: {} };
+EXT.seed.push(
+  ['KEPALA_SEKOLAH', '', 'Nama kepala sekolah (penanda tangan laporan PDF)'],
+  ['NIP_KEPALA_SEKOLAH', '', 'NIP kepala sekolah (penanda tangan laporan PDF)'],
+  ['KOTA_LAPORAN', '', 'Kota pada tanggal tanda tangan laporan (kosong = diambil dari alamat sekolah)']
+);
+var LAP_KONFIG = /^(KEPALA_SEKOLAH|NIP_KEPALA_SEKOLAH|KOTA_LAPORAN)$/;
+
+function lapTgl_(s, def) { return /^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) ? String(s) : def; }
+function lapSekolah_() {
+  var c = settings_(), alamat = c.ALAMAT_SEKOLAH || '';
+  var kota = c.KOTA_LAPORAN || (String(alamat).split(',').map(function (x) { return x.trim(); }).filter(Boolean).pop() || '').replace(/\d+/g, '').trim();
+  return { nama: c.NAMA_SEKOLAH || APP.NAME, alamat: alamat, logo: c.APP_LOGO || c.LOGO_URL || '', kota: kota,
+    kepala: c.KEPALA_SEKOLAH || '', nip_kepala: c.NIP_KEPALA_SEKOLAH || '', tahun_ajaran: c.TAHUN_AJARAN || '', semester: c.SEMESTER || '',
+    kkm: num_(c.KKM, 70), batas_hadir: num_(c.BATAS_KEHADIRAN, 75), bobot: { harian: num_(c.BOBOT_HARIAN, 40), uts: num_(c.BOBOT_UTS, 30), uas: num_(c.BOBOT_UAS, 30) },
+    semester_mulai: c.SEMESTER_MULAI || '', semester_selesai: c.SEMESTER_SELESAI || '', aplikasi: c.APP_NAMA || APP.NAME };
+}
+
+/**
+ * laporan.rekap — d: { jenis: absensi|nilai|lengkap, kelas_id?, NIS?, dari?, sampai?, tahun_ajaran?, semester? }
+ * Hasil: identitas sekolah, kelas (+wali), siswa, rekap absensi (kode harian ringkas), nilai per mapel + peringkat.
+ */
+function apiLaporanRekap(ctx, d) {
+  var sk = lapSekolah_(), jenis = /^(absensi|nilai|lengkap)$/.test(d.jenis) ? d.jenis : 'lengkap';
+  var hariIni = today_(), semSelesai = lapTgl_(sk.semester_selesai, hariIni);
+  var dari = lapTgl_(d.dari, lapTgl_(sk.semester_mulai, hariIni.substring(0, 8) + '01'));
+  var sampai = lapTgl_(d.sampai, semSelesai < hariIni ? semSelesai : hariIni);
+  if (dari > sampai) return fail_('Tanggal awal periode harus sebelum tanggal akhir.');
+  var ta = String(d.tahun_ajaran || sk.tahun_ajaran), sem = String(d.semester || sk.semester);
+  var nisReq = String(d.NIS || '').trim(), kelasReq = String(d.kelas_id || '').trim();
+
+  var siswa = DB.all('Siswa').filter(function (s) {
+    if (nisReq) return String(s.NIS) === nisReq;
+    return (s.status || 'Aktif') === 'Aktif' && (!kelasReq || s.kelas_id === kelasReq);
+  });
+  if (!siswa.length) return fail_(nisReq ? 'Siswa dengan NIS ' + nisReq + ' tidak ditemukan.' : 'Tidak ada siswa aktif pada pilihan ini.');
+  var kelasMap = {}, guruMap = {};
+  DB.all('Kelas').forEach(function (k) { kelasMap[k.kelas_id] = k; });
+  DB.all('Guru').forEach(function (g) { guruMap[g.NUPTK] = g; });
+  siswa.sort(function (a, b) {
+    var ka = (kelasMap[a.kelas_id] || {}).nama_kelas || a.kelas_id, kb = (kelasMap[b.kelas_id] || {}).nama_kelas || b.kelas_id;
+    return String(ka).localeCompare(String(kb), 'id') || String(a.nama_lengkap).localeCompare(String(b.nama_lengkap), 'id');
+  });
+  var nisSet = {}, kelasIds = [];
+  siswa.forEach(function (s) { nisSet[s.NIS] = s; if (kelasIds.indexOf(s.kelas_id) === -1) kelasIds.push(s.kelas_id); });
+  var kelas = kelasIds.map(function (id) {
+    var k = kelasMap[id] || { kelas_id: id, nama_kelas: id }, w = guruMap[k.wali_kelas_id] || {};
+    return { kelas_id: id, nama_kelas: k.nama_kelas || id, jenjang: k.jenjang || '', tingkat: k.tingkat || '', wali: w.nama_lengkap || '', wali_nuptk: w.NUPTK || '' };
+  });
+  var out = { jenis: jenis, sekolah: sk, periode: { dari: dari, sampai: sampai }, tahun_ajaran: ta, semester: sem, perorangan: !!nisReq, dibuat: nowIso_(),
+    pembuat: (userIdx_()[ctx.session.uid] || {}).n || ctx.session.email, kelas: kelas,
+    siswa: siswa.map(function (s) { return { NIS: s.NIS, NISN: s.NISN || '', nama: s.nama_lengkap, jk: s.jenis_kelamin || '', kelas_id: s.kelas_id, jenjang: s.jenjang || '',
+      tempat_lahir: s.tempat_lahir || '', tanggal_lahir: s.tanggal_lahir || '', nama_ortu: s.nama_ortu || '', kode_kartu: s.barcode_id || '' }; }) };
+
+  // ------------------------------------------------ ABSENSI (1× baca sheet)
+  if (jenis !== 'nilai') {
+    var hariKelas = {}, rec = {};
+    DB.all('Absensi').forEach(function (a) {
+      var t = String(a.tanggal); if (t < dari || t > sampai) return;
+      var s = nisSet[a.NIS], k = a.kelas_id || (s && s.kelas_id) || '-';
+      if (kelasIds.indexOf(k) === -1 && !s) return;
+      (hariKelas[k] = hariKelas[k] || {})[t] = 1;
+      if (s) (rec[a.NIS] = rec[a.NIS] || {})[t] = a;
+    });
+    var hari = {}; kelasIds.forEach(function (k) { hari[k] = Object.keys(hariKelas[k] || {}).sort(); });
+    var rekap = {}, kode = {}, log = {};
+    siswa.forEach(function (s) {
+      var days = hari[s.kelas_id] || [], r = { H: 0, T: 0, I: 0, S: 0, A: 0, hari: days.length }, kd = '';
+      days.forEach(function (t) {
+        var a = (rec[s.NIS] || {})[t], st = a ? String(a.status || '').charAt(0).toUpperCase() : 'A';
+        if (!/^[HISA]$/.test(st)) st = 'A';
+        var tl = st === 'H' && a && String(a.terlambat).toUpperCase() === 'YA';
+        r[st]++; if (tl) r.T++;
+        kd += tl ? 'T' : st;
+      });
+      // catatan di luar hari efektif kelas (mis. pindah kelas) tetap dihitung
+      Object.keys(rec[s.NIS] || {}).forEach(function (t) { if (days.indexOf(t) === -1) { var a = rec[s.NIS][t], st = String(a.status || '').charAt(0).toUpperCase(); if (/^[HISA]$/.test(st)) { r[st]++; r.hari++; } } });
+      r.persen = r.hari ? round1_(r.H / r.hari * 100) : null;
+      rekap[s.NIS] = r; kode[s.NIS] = kd;
+      if (nisReq) log[s.NIS] = days.map(function (t) { var a = (rec[s.NIS] || {})[t]; return a ? { tanggal: t, status: a.status, jam: String(a.jam || '').substring(0, 5), metode: a.metode || '', keterangan: a.keterangan || '', terlambat: String(a.terlambat).toUpperCase() === 'YA' } : { tanggal: t, status: 'Alpha', jam: '', metode: '', keterangan: 'Tanpa keterangan (tidak tercatat)', terlambat: false }; });
+    });
+    out.absensi = { hari: hari, rekap: rekap, kode: kode, log: log };
+  }
+
+  // ------------------------------------------------ NILAI (raport: harian, UTS, UAS, akhir, predikat)
+  if (jenis !== 'absensi') {
+    var urutMapel = [], kodeMapel = {}, mapel = [], baris = {}, kelasRank = {};
+    DB.all('Mapel').forEach(function (m) { urutMapel.push(m.nama); if (m.kode) kodeMapel[m.nama] = String(m.kode); });
+    DB.all('Nilai').forEach(function (n) {
+      if (String(n.tahun_ajaran) !== ta || String(n.semester) !== sem) return;
+      var s = nisSet[n.NIS], mp = String(n.mata_pelajaran || ''); if (!mp) return;
+      // peringkat dihitung terhadap seluruh kelas yang sama (bukan hanya siswa terpilih)
+      if (n.nilai_akhir !== '' && (s || kelasIds.indexOf(n.kelas_id) > -1)) { var kr = kelasRank[n.kelas_id || (s && s.kelas_id)] = kelasRank[n.kelas_id || (s && s.kelas_id)] || {}; var x = kr[n.NIS] = kr[n.NIS] || [0, 0]; x[0] += num_(n.nilai_akhir); x[1]++; }
+      if (!s) return;
+      if (mapel.indexOf(mp) === -1) mapel.push(mp);
+      (baris[n.NIS] = baris[n.NIS] || {})[mp] = { harian: n.nilai_harian === '' ? '' : num_(n.nilai_harian), uts: n.nilai_uts === '' ? '' : num_(n.nilai_uts), uas: n.nilai_uas === '' ? '' : num_(n.nilai_uas),
+        akhir: n.nilai_akhir === '' ? '' : num_(n.nilai_akhir), predikat: n.predikat || predikat_(n.nilai_akhir === '' ? '' : num_(n.nilai_akhir)), catatan: n.catatan || '' };
+    });
+    mapel.sort(function (a, b) { var ia = urutMapel.indexOf(a), ib = urutMapel.indexOf(b); return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib) || a.localeCompare(b, 'id'); });
+    var peringkat = {}, jmlKelas = {};
+    Object.keys(kelasRank).forEach(function (k) {
+      var list = Object.keys(kelasRank[k]).map(function (nis) { return { nis: nis, rata: kelasRank[k][nis][0] / kelasRank[k][nis][1] }; }).sort(function (a, b) { return b.rata - a.rata; });
+      jmlKelas[k] = list.length;
+      list.forEach(function (x, i) { if (nisSet[x.nis] && (nisSet[x.nis].kelas_id === k || !peringkat[x.nis])) peringkat[x.nis] = { ke: i + 1, dari: list.length, rata: round1_(x.rata) }; });
+    });
+    out.nilai = { mapel: mapel, kode: kodeMapel, baris: baris, peringkat: peringkat };
+  }
+  return ok_(out);
+}
+
+/** Penanda tangan bawaan (Super Admin) — disimpan di sheet Config (baris yang sudah ada) */
+function apiLaporanTtd(ctx, d) {
+  var clean = {};
+  Object.keys(d || {}).forEach(function (k) { if (LAP_KONFIG.test(k)) clean[k] = String(d[k] || '').trim().substring(0, 120); });
+  if (!Object.keys(clean).length) return fail_('Tidak ada yang disimpan.');
+  saveSettings_(clean);
+  return ok_(clean, 'Penanda tangan laporan disimpan.');
+}
+
+EXT.routes.push(function (add) {
+  add('laporan.rekap', apiLaporanRekap, 'guru', false, { ttl: 300 });     // cache 5 menit, basi otomatis saat ada data baru
+  add('laporan.ttd', apiLaporanTtd, 'sa', true, { audit: true });
+});
+
+
+/**
+ * UPDATE KE v3.1 — jalankan SEKALI dari editor (opsional, aman diulang).
+ * Hanya menambah 3 baris pengaturan penanda tangan laporan di sheet Config (bila belum ada),
+ * memanaskan cache, lalu menampilkan cek performa. Tidak mengubah data yang sudah ada.
+ */
+function setupV31() {
+  resetMemo_();
+  if (!prop_('SPREADSHEET_ID')) { Logger.log('⚠️ Belum ada setup. Jalankan setupAppEnvironment() dulu.'); return; }
+  Logger.log('🔧 Update ke v' + APP.VERSION + ' (Turbo LMS, Laporan PDF/Excel, QR Code) ...');
+  upgradeSchema(true);
+  try { Logger.log('🔥 Warmup: ' + warmCaches_('setup')); } catch (e) { Logger.log('⚠️ Warmup: ' + e.message); }
+  setProp_('V31_SIAP', APP.VERSION);
+  Logger.log('✅ Selesai. Lanjutkan: Deploy → Manage deployments → ✏️ Edit → Version: New version → Deploy.');
+  if (typeof cekPerforma === 'function') cekPerforma();
+}
 if (typeof pasangEkstensi_ === 'function' && typeof SCHEMA !== 'undefined') pasangEkstensi_();
 
 ;
@@ -7750,7 +7994,7 @@ function seedDemoV3_(rnd) {
   log.sort(function (a, b) { return String(a.waktu).localeCompare(String(b.waktu)); });
   DB.appendBatch('LogAktivitas', log);
   setProp_('V3_SIAP', APP.VERSION);
-  bump_('lms');
+  bump_('lms'); bump_('lmsr');
 }
 
 if (typeof pasangEkstensi_ === 'function' && typeof SCHEMA !== 'undefined') pasangEkstensi_();

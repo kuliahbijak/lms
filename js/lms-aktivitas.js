@@ -11,23 +11,46 @@ daftarHalaman(['guru', 'siswa'], 'aktivitas', function () { return {
   render: function (el, mid) { if (!mid) { go('kursus'); return; } muatAktivitas(el, mid); }
 }; });
 
-function lmsBasi(kid) { Store.del(userKey('lms:kursus')); if (kid) Store.del(userKey('lms:k:' + kid)); }
-async function muatAktivitas(el, mid) {
-  el.innerHTML = '<div class="sk" style="height:110px"></div><div class="sk mt16" style="height:300px"></div>';
-  var r = await api('lms.modul.get', { modul_id: mid });
-  if (currentRoute().param !== mid) return;
-  if (!r.success) { el.innerHTML = errorBox(r.message) + '<div class="mt16"><a class="btn btn-outline" href="#/kursus">' + ic('arrow-left') + 'Kembali ke kursus</a></div>'; return; }
-  var m = r.data;
-  document.title = m.judul + ' — ' + brandNama();
+/** v3.1: tandai cache kursus "basi" (bukan dihapus) → saat dibuka tampil seketika dari data terakhir, lalu langsung disegarkan dari server */
+function lmsBasiLunak(kunci) { var c = Store.get(userKey(kunci), null); if (c) { c.t = 0; Store.set(userKey(kunci), c); } }
+function lmsBasi(kid) { lmsBasiLunak('lms:kursus'); if (kid) lmsBasiLunak('lms:k:' + kid); }
+/* v3.1 turbo: tampil SEKETIKA dari data kursus/cache perangkat, lalu dicocokkan dengan server.
+   Isi aktivitas (kuis, tugas, …) & detail modul diminta di tik yang sama → 1 eksekusi batch. */
+function tandaModul(m) { return JSON.stringify([m.judul, m.deskripsi, m.tipe, m.konten, m.kelola, m.buka, m.tutup, m.nilai_maks, m.penyelesaian, m.peran]); }
+function metaAktivitas(m) {
   var meta = [tipeLabel(m.tipe)];
   if (m.tutup) meta.push((Date.now() > msDari(m.tutup) ? 'Ditutup ' : 'Tenggat ') + tglJam(m.tutup));
-  if (!m.kelola && m.penyelesaian.mode !== 'tidak') meta.push(m.status === 'gagal' ? '<span class="bad-t">Belum mencapai nilai minimal</span>' : m.status ? '<span class="ok-t">' + ic('circle-check') + 'Selesai</span>' : '<span class="muted">Belum selesai</span>');
+  if (!m.kelola && m.penyelesaian && m.penyelesaian.mode !== 'tidak') meta.push(m.status === 'gagal' ? '<span class="bad-t">Belum mencapai nilai minimal</span>' : m.status ? '<span class="ok-t">' + ic('circle-check') + 'Selesai</span>' : '<span class="muted">Belum selesai</span>');
   if (!m.kelola && m.nilai !== null && m.nilai !== undefined) meta.push('<b>Nilai ' + fmtN(m.nilai) + '%</b>');
-  el.innerHTML = '<div class="ak-head"><a href="#/kursus/' + esc(m.kursus_id) + '" class="kh-back">' + ic('arrow-left') + esc(m.kursus_nama) + '</a><div class="row gap12 mt8">' + tipeIkon(m.tipe, 'besar') + '<div class="grow"><h1>' + esc(m.judul) + '</h1><div class="mod-meta">' + meta.join(' • ') + '</div></div>' +
+  return meta.join(' • ');
+}
+function gambarAktivitas(el, m) {
+  var mid = m.modul_id;
+  document.title = m.judul + ' — ' + brandNama();
+  el.innerHTML = '<div class="ak-head"><a href="#/kursus/' + esc(m.kursus_id) + '" class="kh-back">' + ic('arrow-left') + esc(m.kursus_nama) + '</a><div class="row gap12 mt8">' + tipeIkon(m.tipe, 'besar') + '<div class="grow"><h1>' + esc(m.judul) + '</h1><div class="mod-meta" id="akMeta">' + metaAktivitas(m) + '</div></div>' +
     (m.kelola ? '<button class="btn btn-outline btn-sm" id="akEdit">' + ic('settings') + '<span class="hide-m">Pengaturan</span></button>' : '') + '</div>' + (m.deskripsi ? '<div class="mt12">' + md(m.deskripsi) + '</div>' : '') + '</div><div id="akBody" class="mt16"></div>';
-  if ($('#akEdit', el)) $('#akEdit', el).onclick = async function () { var k = await api('lms.kursus.get', { kursus_id: m.kursus_id }); if (k.success) editorModul(k.data, { modul: k.data.modul.filter(function (x) { return x.modul_id === mid; })[0] }, function () { lmsBasi(m.kursus_id); muatAktivitas(el, mid); }); };
+  if ($('#akEdit', el)) $('#akEdit', el).onclick = async function () {
+    var c = Store.get(userKey('lms:k:' + m.kursus_id), null), k = c ? { success: true, data: c.data } : null;   // pakai data kursus yang sudah ada
+    if (!k) { btnBusy(this, true); k = await api('lms.kursus.get', { kursus_id: m.kursus_id }); btnBusy(this, false); }
+    if (k.success) editorModul(k.data, { modul: k.data.modul.filter(function (x) { return x.modul_id === mid; })[0] }, function () { lmsBasi(m.kursus_id); muatAktivitas(el, mid); });
+  };
   var body = $('#akBody', el), v = VIEW[m.tipe] || VIEW._sumber;
   try { v(body, m, el); } catch (e) { console.error(e); body.innerHTML = errorBox(e.message); }
+}
+async function muatAktivitas(el, mid) {
+  var kc = LC.kunci('lms.modul.get', { modul_id: mid }), c = LC.get(kc);
+  var awal = c && Date.now() - c.t < LC.UMUR ? c.data : LmsIdx.m[mid];
+  if (awal && awal.terkunci) awal = null;                          // terkunci → tunggu keputusan server
+  if (awal) gambarAktivitas(el, awal);
+  else el.innerHTML = '<div class="sk" style="height:110px"></div><div class="sk mt16" style="height:300px"></div>';
+  var n0 = Interaksi.n;
+  var r = await apiQ('lms.modul.get', { modul_id: mid });
+  if (currentRoute().param !== mid) return;
+  if (!r.success) { LC.hapus(function (k) { return k === kc; }); el.innerHTML = errorBox(r.message) + '<div class="mt16"><a class="btn btn-outline" href="#/kursus">' + ic('arrow-left') + 'Kembali ke kursus</a></div>'; return; }
+  LC.set(kc, r.data);
+  var m = r.data;
+  if (!awal || (tandaModul(awal) !== tandaModul(m) && Interaksi.n === n0 && !adaIsian())) gambarAktivitas(el, m);
+  else if ($('#akMeta', el)) { $('#akMeta', el).innerHTML = metaAktivitas(m); Object.assign(awal, { status: m.status, nilai: m.nilai }); }
 }
 
 var VIEW = {};
@@ -58,7 +81,7 @@ VIEW._sumber = function (body, m) {
 VIEW.kuis = function (body, m, el) {
   if (m.kelola) return kuisGuru(body, m, el);
   body.innerHTML = '<div class="sk" style="height:200px"></div>';
-  api('kuis.info', { modul_id: m.modul_id }).then(function (r) {
+  apiLR('kuis.info', { modul_id: m.modul_id }, function (r) {
     if (!r.success) { body.innerHTML = errorBox(r.message); return; }
     var d = r.data, k = d.modul.konten, bisa = d.sudahBuka && !d.sudahTutup && (d.sisa === null || d.sisa > 0 || d.berjalan);
     body.innerHTML = '<div class="grid g-main"><div class="card card-p"><h3>' + ic('info') + ' Informasi Kuis</h3>' + (k.petunjuk ? md(k.petunjuk) : '') +
@@ -79,13 +102,13 @@ function kuisGuru(body, m, el) {
   function tab(t) {
     $$('#kgTab button', body).forEach(function (b) { b.classList.toggle('on', b.dataset.t === t); });
     box.innerHTML = '<div class="sk" style="height:200px"></div>';
-    if (t === 'soal') api('kuis.info', { modul_id: m.modul_id }).then(function (r) {
+    if (t === 'soal') apiLR('kuis.info', { modul_id: m.modul_id }, function (r) {
       if (!r.success) { box.innerHTML = errorBox(r.message); return; }
       var k = r.data.modul.konten;
       box.innerHTML = '<div class="card"><div class="card-h"><div class="grow"><h3>' + r.data.soal.length + ' soal • total skor ' + r.data.soal.reduce(function (s, q) { return s + Number(q.skor); }, 0) + '</h3><p>' + (k.waktu_menit ? k.waktu_menit + ' menit • ' : '') + (k.percobaan_maks ? k.percobaan_maks + '× kesempatan • ' : '') + (k.acak_soal ? 'soal diacak • ' : '') + r.data.percobaan + ' percobaan</p></div><a class="btn btn-outline btn-sm" href="#/banksoal/' + esc(m.kursus_id) + '">' + ic('list-checks') + 'Bank soal</a></div>' +
         r.data.soal.map(function (q, i) { return '<div class="soal-ring"><span class="bdg navy">' + (i + 1) + '</span><span class="bdg">' + esc(SOAL_LBL[q.tipe] || '?') + '</span><div class="grow">' + (q.hilang ? '<i class="bad-t">Soal dihapus dari bank</i>' : esc(q.teks)) + '</div><span class="xs muted">' + q.skor + ' poin</span></div>'; }).join('') + '</div>';
     });
-    else if (t === 'cob') api('kuis.percobaan', { modul_id: m.modul_id }).then(function (r) {
+    else if (t === 'cob') apiLR('kuis.percobaan', { modul_id: m.modul_id }, function (r) {
       if (!r.success) { box.innerHTML = errorBox(r.message); return; }
       var d = r.data, sdh = d.siswa.filter(function (s) { return s.percobaan.length; });
       box.innerHTML = '<div class="grid g4">' + kpi('Sudah mengerjakan', sdh.length + '<small>/' + d.siswa.length + '</small>', '', 'users', 'info') + kpi('Perlu dinilai', d.perluDinilai, 'jawaban esai', 'pen-line', d.perluDinilai ? 'amber' : '') +
@@ -95,7 +118,7 @@ function kuisGuru(body, m, el) {
       $('#kgCsv', box).onclick = function () { downloadCSV('kuis-' + m.modul_id + '.csv', ['Siswa', 'Percobaan', 'Nilai %', 'Durasi (detik)', 'Status', 'Nilai akhir'], [].concat.apply([], d.siswa.map(function (s) { return s.percobaan.length ? s.percobaan.map(function (p) { return [s.nama, p.no, p.persen, p.durasi_detik, p.status, s.nilai]; }) : [[s.nama, '', '', '', 'belum', '']]; }))); };
       box.onclick = function (e) { var b = e.target.closest('[data-ul]'); if (b) kuisUlasanModal(b.dataset.ul, true, function () { tab('cob'); }); };
     });
-    else if (t === 'ana') api('kuis.percobaan', { modul_id: m.modul_id }).then(function (r) {
+    else if (t === 'ana') apiLR('kuis.percobaan', { modul_id: m.modul_id }, function (r) {
       if (!r.success) { box.innerHTML = errorBox(r.message); return; }
       box.innerHTML = '<div class="card card-p"><h3>' + ic('chart-column') + ' Analisis Butir Soal</h3><p class="small muted">Persentase siswa menjawab benar & rata-rata skor per soal. Soal di bawah 40% patut ditinjau.</p>' +
         (r.data.analisis.length ? r.data.analisis.map(function (a, i) { return '<div class="ana-i"><div class="row"><span class="bdg">' + (i + 1) + '</span><span class="grow small clamp2">' + esc(a.teks) + '</span><b class="' + (a.persenBenar < 40 ? 'bad-t' : a.persenBenar >= 75 ? 'ok-t' : '') + '">' + a.persenBenar + '%</b></div>' + barProgres(a.persenBenar, a.persenBenar < 40 ? 'bad' : a.persenBenar >= 75 ? 'ok' : '') + '<div class="xs muted">' + a.n + ' jawaban • rata skor ' + a.rataSkor + '% • ' + esc(SOAL_LBL[a.tipe] || '') + '</div></div>'; }).join('') : emptyHtml('Belum ada data', '', 'chart-column')) + '</div>';
@@ -254,7 +277,7 @@ function rubrikTabel(rub, pilih, interaktif) {
 VIEW.tugas = function (body, m) {
   if (m.kelola) return tugasGuru(body, m);
   body.innerHTML = '<div class="sk" style="height:240px"></div>';
-  api('tugas.get', { modul_id: m.modul_id }).then(function (r) {
+  apiLR('tugas.get', { modul_id: m.modul_id }, function (r) {
     if (!r.success) { body.innerHTML = errorBox(r.message); return; }
     var d = r.data, k = d.modul.konten, t = d.kiriman || {}, tutup = msDari(m.tutup), lewat = tutup && Date.now() > tutup, dinilai = t.status === 'dinilai', terkirim = t.status === 'terkirim';
     var stat = dinilai ? '<span class="bdg ok">' + ic('award') + 'Dinilai</span>' : terkirim ? '<span class="bdg info">' + ic('check') + 'Terkirim' + (t.terlambat ? ' (terlambat)' : '') + '</span>' : '<span class="bdg amber">Belum dikumpulkan</span>';
@@ -286,7 +309,7 @@ VIEW.tugas = function (body, m) {
 };
 function tugasGuru(body, m) {
   body.innerHTML = '<div class="sk" style="height:240px"></div>';
-  api('tugas.list', { modul_id: m.modul_id }).then(function (r) {
+  apiLR('tugas.list', { modul_id: m.modul_id }, function (r) {
     if (!r.success) { body.innerHTML = errorBox(r.message); return; }
     var d = r.data, kel = !!d.kelompok, baris = kel ? d.kelompok.map(function (g) { return { nama: g.nama, sub: g.anggota.map(function (a) { return a.nama; }).join(', '), kiriman: g.kiriman }; }) : d.siswa.map(function (s) { return { nama: s.nama, kiriman: s.kiriman }; });
     var st = function (x) { var t = x.kiriman; return !t || t.status === 'draf' ? 'belum' : t.status === 'dinilai' ? 'dinilai' : 'perlu'; };
@@ -342,7 +365,7 @@ VIEW.forum = function (body, m) {
   var st = { diskusi: null };
   function daftar() {
     body.innerHTML = '<div class="sk" style="height:220px"></div>';
-    api('forum.list', { modul_id: m.modul_id }).then(function (r) {
+    apiLR('forum.list', { modul_id: m.modul_id }, function (r) {
       if (!r.success) { body.innerHTML = errorBox(r.message); return; }
       var d = r.data, k = d.modul.konten;
       if (k.jenis === 'satu' && d.satu) return thread(d.satu);
@@ -355,9 +378,10 @@ VIEW.forum = function (body, m) {
     });
   }
   function thread(did) {
+    var sama = st.diskusi === did && body.querySelector('.thread');   // v3.1: muat ulang topik yang sama tanpa kedip kerangka
     st.diskusi = did;
-    body.innerHTML = '<div class="sk" style="height:260px"></div>';
-    api('forum.diskusi', { diskusi_id: did }).then(function (r) {
+    if (!sama) body.innerHTML = '<div class="sk" style="height:260px"></div>';
+    apiLR('forum.diskusi', { diskusi_id: did }, function (r) {
       if (!r.success) { body.innerHTML = errorBox(r.message); return; }
       var d = r.data, dk = d.diskusi, posts = d.post, anak = {};
       posts.forEach(function (p) { (anak[p.induk_id || '_'] = anak[p.induk_id || '_'] || []).push(p); });
@@ -409,8 +433,9 @@ VIEW.wiki = function (body, m) {
   var lk = { grup_id: '', pemilik: '' }, judul = '';
   function muat(j) {
     judul = j || '';
-    body.innerHTML = '<div class="sk" style="height:260px"></div>';
-    api('wiki.get', Object.assign({ modul_id: m.modul_id, judul: judul }, lk)).then(function (r) {
+    var lama = body.querySelector('.wiki-main');                       // v3.1: halaman lama tetap tampil (redup) sampai data baru siap
+    if (lama) lama.style.opacity = '.6'; else body.innerHTML = '<div class="sk" style="height:260px"></div>';
+    apiLR('wiki.get', Object.assign({ modul_id: m.modul_id, judul: judul }, lk), function (r) {
       if (!r.success) { body.innerHTML = errorBox(r.message); return; }
       var d = r.data, h = d.halaman; lk = d.lingkup;
       body.innerHTML = '<div class="wiki-wrap"><aside class="card card-p wiki-side">' +
@@ -459,7 +484,7 @@ VIEW.wiki = function (body, m) {
 VIEW.glosarium = function (body, m) {
   var q = '', huruf = '';
   function muat() {
-    api('glos.list', { modul_id: m.modul_id, cari: q, huruf: huruf }).then(function (r) {
+    apiLR('glos.list', { modul_id: m.modul_id, cari: q, huruf: huruf }, function (r) {
       if (!r.success) { body.innerHTML = errorBox(r.message); return; }
       var d = r.data;
       if (!$('#glCari', body)) {
@@ -496,7 +521,7 @@ VIEW.glosarium = function (body, m) {
 var WS_LBL = { penyiapan: 'Penyiapan', pengiriman: 'Pengiriman karya', penilaian: 'Penilaian sejawat', evaluasi: 'Evaluasi nilai', selesai: 'Selesai' };
 VIEW.workshop = function (body, m) {
   body.innerHTML = '<div class="sk" style="height:240px"></div>';
-  api('ws.get', { modul_id: m.modul_id }).then(function (r) {
+  apiLR('ws.get', { modul_id: m.modul_id }, function (r) {
     if (!r.success) { body.innerHTML = errorBox(r.message); return; }
     var d = r.data, fase = d.fase, urut = Object.keys(WS_LBL), fi = urut.indexOf(fase);
     var step = '<div class="ws-step">' + urut.map(function (f, i) { return '<div class="' + (i < fi ? 'lewat' : i === fi ? 'kini' : '') + '"><span>' + (i < fi ? ic('check') : i + 1) + '</span><b>' + WS_LBL[f] + '</b></div>'; }).join('') + '</div>';
@@ -593,7 +618,7 @@ VIEW.pelajaran = function (body, m) {
 // =====================================================================
 VIEW.umpanbalik = function (body, m) {
   body.innerHTML = '<div class="sk" style="height:220px"></div>';
-  api('ub.get', { modul_id: m.modul_id }).then(function (r) {
+  apiLR('ub.get', { modul_id: m.modul_id }, function (r) {
     if (!r.success) { body.innerHTML = errorBox(r.message); return; }
     var d = r.data;
     if (m.kelola) return hasil(true, d);
@@ -622,7 +647,7 @@ VIEW.umpanbalik = function (body, m) {
   function hasil(guru, info) {
     var box = guru ? body : $('#ubBox', body);
     box.innerHTML = '<div class="sk mt16" style="height:200px"></div>';
-    api('ub.hasil', { modul_id: m.modul_id }).then(function (r) {
+    apiLR('ub.hasil', { modul_id: m.modul_id }, function (r) {
       if (!r.success) { box.innerHTML = errorBox(r.message); return; }
       var d = r.data;
       box.innerHTML = (guru ? '<div class="grid g3">' + kpi('Responden', d.jml + '<small>/' + d.jml_siswa + '</small>', d.jml_siswa ? Math.round(d.jml / d.jml_siswa * 100) + '% partisipasi' : '', 'users', 'info') + kpi('Mode', d.anonim ? 'Anonim' : 'Bernama', '', d.anonim ? 'venetian-mask' : 'user-round') + kpi('Pertanyaan', d.hasil.length, '', 'list') + '</div>' : '') +
@@ -663,7 +688,7 @@ VIEW.kelasvirtual = function (body, m) {
     if (m.kelola) hadir();
   };
   function hadir() {
-    api('kv.hadir', { modul_id: m.modul_id }).then(function (r) {
+    apiLR('kv.hadir', { modul_id: m.modul_id }, function (r) {
       if (!r.success) return;
       $('#kvHadir', body).innerHTML = '<div class="card"><div class="card-h"><h3>' + ic('user-check') + ' Kehadiran ' + r.data.jml_hadir + '/' + r.data.siswa.length + '</h3></div><div class="card-b">' + r.data.siswa.map(function (s) { return '<div class="list-i small"><span class="grow">' + esc(s.nama) + '</span>' + (s.hadir.length ? '<span class="bdg ok">' + tglJam(s.hadir[s.hadir.length - 1], true) + '</span>' : '<span class="muted">—</span>') + '</div>'; }).join('') + '</div></div>';
     });

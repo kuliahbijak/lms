@@ -177,7 +177,7 @@ var _inflight = {}, _writeEpoch = 0;
 function api(action, data, opt) {
   opt = opt || {};
   var isRead = READ_ACTIONS.test(action) || action === 'login' || (window.READ_EXT && READ_EXT.test(action));   // v3.0: aksi baca modul tambahan
-  if (!isRead) { _writeEpoch++; return apiRun(action, data, opt, false); }
+  if (!isRead) { _writeEpoch++; runHooks('tulis', action, data); return apiRun(action, data, opt, false); }   // v3.1: cache baca terkait dibuang
   if (action === 'login') return apiRun(action, data, opt, true);
   var k = _writeEpoch + '|' + action + '|' + AppState.token + '|' + JSON.stringify(data || {});
   if (_inflight[k]) return _inflight[k];
@@ -208,12 +208,18 @@ var Batcher = {
     var uniq = [], idx = {};
     q.forEach(function (x) { var k = x.action + '|' + JSON.stringify(x.data); if (idx[k] === undefined) { idx[k] = uniq.length; uniq.push({ action: x.action, data: x.data, k: k, waiters: [] }); } uniq[idx[k]].waiters.push(x.res); });
     var byAction = {}, calls = [], solo = [];
-    uniq.forEach(function (u) { if (byAction[u.action]) solo.push(u); else { byAction[u.action] = 1; calls.push(u); } });
+    // v3.1: server ≥ 3.1 menerima kunci hasil per panggilan → aksi sama dengan data berbeda tetap 1 batch
+    var kunciOk = DEMO || /^(3\.[1-9]|[4-9]\.)/.test(Perf.serverVersion || '');
+    uniq.forEach(function (u) {
+      var n = byAction[u.action] || 0;
+      if (n && !kunciOk) { solo.push(u); return; }
+      byAction[u.action] = n + 1; u.kk = n ? u.action + '#' + n : u.action; calls.push(u);
+    });
     solo.forEach(function (u) { api(u.action, u.data).then(function (r) { u.waiters.forEach(function (w) { w(r); }); }); });
     for (var i = 0; i < calls.length; i += 10) (function (part) {
       if (part.length === 1) { api(part[0].action, part[0].data).then(function (r) { part[0].waiters.forEach(function (w) { w(r); }); }); return; }
-      api('batch', { calls: part.map(function (u) { return { action: u.action, data: u.data }; }) }).then(function (r) {
-        part.forEach(function (u) { var one = r.success ? (r.data[u.action] || { success: false, message: 'Tidak ada hasil.' }) : r; u.waiters.forEach(function (w) { w(one); }); });
+      api('batch', { calls: part.map(function (u) { return u.kk !== u.action ? { action: u.action, data: u.data, k: u.kk } : { action: u.action, data: u.data }; }) }).then(function (r) {
+        part.forEach(function (u) { var one = r.success ? (r.data[u.kk] || { success: false, message: 'Tidak ada hasil.' }) : r; u.waiters.forEach(function (w) { w(one); }); });
       });
     })(calls.slice(i, i + 10));
   }
@@ -291,7 +297,7 @@ function route() {
   runHooks('route', name, r.param);                        // v3.0: pelacakan halaman, dll.
 }
 /* v3.0 — titik sambung modul tambahan (LMS, pesan, branding): fungsi didaftarkan file baru */
-var Hooks = window.Hooks || { login: [], publik: [], shell: [], meta: [], route: [] };
+var Hooks = window.Hooks || { login: [], publik: [], shell: [], meta: [], route: [], tulis: [] };
 function runHooks(nama) { var a = Array.prototype.slice.call(arguments, 1); (Hooks[nama] || []).forEach(function (f) { try { f.apply(null, a); } catch (e) { console.error('hook ' + nama, e); } }); }
 function markAllDirty(renderCurrent) {
   var reg = Pages[regRole()] || {};

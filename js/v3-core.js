@@ -234,3 +234,126 @@ function peranLabel(r) { return { superadmin: 'Super Admin', guru: 'Guru', siswa
 function salinTeks(t) { if (navigator.clipboard) navigator.clipboard.writeText(t).then(function () { toast('Disalin.', 'ok'); }, function () { toast('Gagal menyalin.', 'bad'); }); }
 /** Daftarkan halaman untuk satu/lebih peran memakai pabrik definisi (state terpisah per peran) */
 function daftarHalaman(peran, nama, pabrik) { peran.forEach(function (r) { registerPage(r, nama, pabrik(r)); }); }
+
+// =====================================================================
+// v3.1 — TURBO LMS (gas-scale-turbo §4): tampil seketika dari cache perangkat,
+// segarkan di latar (beberapa baca di tik yang sama = 1 eksekusi batch),
+// render ulang hanya bila data berubah DAN pengguna belum mulai berinteraksi.
+// =====================================================================
+var Interaksi = { n: 0 };
+['pointerdown', 'keydown'].forEach(function (ev) { addEventListener(ev, function () { Interaksi.n++; }, { capture: true, passive: true }); });
+/** Ada isian yang sedang diketik / dialog terbuka → jangan ganti tampilan diam-diam */
+function adaIsian() {
+  if ($('.overlay')) return true;
+  var a = document.activeElement;
+  return !!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.closest('#content'));
+}
+var LC = {
+  MAKS: 150, UMUR: 30 * 60000, mem: {},
+  kunci: function (a, d) { return 'lc:' + a + '|' + JSON.stringify(d || {}); },
+  idx: function () { return Store.get(userKey('lc:idx'), []); },
+  get: function (k) { var uk = userKey(k); if (this.mem[uk]) return this.mem[uk]; var v = Store.get(uk, null); if (v) this.mem[uk] = v; return v; },
+  set: function (k, data) {
+    var uk = userKey(k), v = { t: Date.now(), h: hashStr(JSON.stringify(data)), data: data };
+    this.mem[uk] = v; Store.set(uk, v);
+    var ix = this.idx().filter(function (x) { return x !== k; }); ix.push(k);
+    while (ix.length > this.MAKS) { var b = ix.shift(); delete this.mem[userKey(b)]; Store.del(userKey(b)); }
+    Store.set(userKey('lc:idx'), ix);
+    return v;
+  },
+  hapus: function (fn) {
+    var self = this, sisa = [];
+    this.idx().forEach(function (k) { if (fn(k)) { delete self.mem[userKey(k)]; Store.del(userKey(k)); } else sisa.push(k); });
+    Store.set(userKey('lc:idx'), sisa);
+  }
+};
+/**
+ * Baca cache-dulu: cb dipanggil SEKETIKA dengan data cache (bila ada), lalu sekali lagi
+ * dengan data server bila berubah. Pengganti pola api(aksi, data).then(cb).
+ */
+function apiLR(action, data, cb) {
+  var cari = data && (data.cari || data.q), k = LC.kunci(action, data), c = cari ? null : LC.get(k);
+  var rute = location.hash, n0 = Interaksi.n, tampil = false;
+  if (c && Date.now() - c.t < LC.UMUR) {
+    tampil = true;
+    try { cb({ success: true, data: c.data, cached: true }); } catch (e) { console.error(e); }
+    if (Date.now() - c.t < 4000) return;                         // baru saja segar → tidak perlu ke server
+  }
+  apiQ(action, data).then(function (r) {
+    if (r.success && !cari) {
+      var h = hashStr(JSON.stringify(r.data)); LC.set(k, r.data);
+      if (c && c.h === h && tampil) return;                       // sama → tidak render ulang
+    }
+    if (location.hash !== rute) return;                            // sudah pindah halaman
+    if (tampil && (!r.success || Interaksi.n !== n0 || adaIsian())) return;
+    cb(r);
+  });
+}
+// Aksi tulis LMS → cache baca yang memuat ID terkait dibuang (tanpa ID → semua cache LMS dibuang)
+(Hooks.tulis = Hooks.tulis || []).push(function (action, data) {
+  if (!/^(lms|kuis|tugas|forum|wiki|glos|ws|pel|ub|kv|nilai|soal|rubrik)\./.test(action)) return;
+  var ids = [];
+  Object.keys(data || {}).forEach(function (f) { var v = data[f]; if (typeof v === 'string' && /^[A-Z]{2,6}\d{3,}$/.test(v)) ids.push(v); });
+  LC.hapus(function (k) { return !ids.length || ids.some(function (id) { return k.indexOf(id) > -1; }); });
+});
+
+/** Indeks modul dari data kursus yang sudah dibuka → halaman aktivitas tampil tanpa menunggu server */
+var LmsIdx = {
+  m: {},
+  isi: function (d) {
+    if (!d || !d.kursus) return;
+    var k = d.kursus;
+    (d.modul || []).forEach(function (m) { LmsIdx.m[m.modul_id] = Object.assign({}, m, { kursus_id: k.kursus_id, kursus_nama: k.nama, peran: k.peran, kelola: !!k.kelola, _sementara: true }); });
+  }
+};
+/** Prefetch saat idle setelah masuk: daftar kursus & pesan (digabung 1 batch) */
+Hooks.shell.push(function () {
+  (window.requestIdleCallback || function (f) { setTimeout(f, 1200); })(function () {
+    if (!AppState.token) return;
+    function ambil(kunci, aksi) {                                  // semua di tik yang sama → 1 eksekusi batch
+      var c = Store.get(userKey(kunci), null);
+      if (!c || Date.now() - c.t > 60000) apiQ(aksi, {}).then(function (r) { if (r && r.success) Store.set(userKey(kunci), { t: Date.now(), h: hashStr(JSON.stringify(r.data)), data: r.data }); });
+    }
+    ambil('lms:kursus', 'lms.kursus.list');
+    ambil('lc:pesan.daftar|{}', 'pesan.daftar');
+    if (isSiswa()) ambil('billing.mine', 'billing.mine');
+  }, { timeout: 3000 });
+});
+/** Prefetch detail kursus (dipanggil halaman daftar kursus) — hanya yang belum ada/lebih dari 2 menit */
+function prefetchKursus(ids) {
+  (window.requestIdleCallback || function (f) { setTimeout(f, 800); })(function () {
+    (ids || []).slice(0, 6).forEach(function (kid, i) {
+      var c = Store.get(userKey('lms:k:' + kid), null);
+      if (c && Date.now() - c.t < 120000) return;
+      setTimeout(function () {
+        api('lms.kursus.get', { kursus_id: kid }).then(function (r) { if (r && r.success) { Store.set(userKey('lms:k:' + kid), { t: Date.now(), h: hashStr(JSON.stringify(r.data)), data: r.data }); LmsIdx.isi(r.data); } });
+      }, i * 250);
+    });
+  }, { timeout: 2500 });
+}
+/** Saat kursus dibuka: isi aktivitas yang kemungkinan dibuka berikutnya diambil di latar
+    (maks 6, digabung 1 batch, hanya aksi baca tanpa efek samping). Membuka aktivitas jadi seketika. */
+var PREFETCH_AKT = {
+  siswa: { kuis: 'kuis.info', forum: 'forum.list', glosarium: 'glos.list', workshop: 'ws.get', umpanbalik: 'ub.get' },
+  guru: { kuis: 'kuis.info', forum: 'forum.list', glosarium: 'glos.list', workshop: 'ws.get', umpanbalik: 'ub.get', tugas: 'tugas.list' }
+};
+function prefetchAktivitas(d) {
+  if (!d || !d.kursus || !d.modul) return;
+  (window.requestIdleCallback || function (f) { setTimeout(f, 900); })(function () {
+    var kelola = !!d.kursus.kelola, peta = PREFETCH_AKT[kelola ? 'guru' : 'siswa'], n = 0;
+    d.modul.filter(function (m) { return peta[m.tipe] && (kelola || (!m.terkunci && m.tampil !== 'TIDAK')); })
+      .sort(function (a, b) { return (a.status ? 1 : 0) - (b.status ? 1 : 0); })          // yang belum selesai dulu
+      .forEach(function (m) {
+        if (n >= 6) return;
+        var aksi = peta[m.tipe], data = m.tipe === 'glosarium' ? { modul_id: m.modul_id, cari: '', huruf: '' } : { modul_id: m.modul_id };
+        var k = LC.kunci(aksi, data), c = LC.get(k);
+        if (c && Date.now() - c.t < 120000) return;
+        n++; apiQ(aksi, data).then(function (r) { if (r && r.success) LC.set(k, r.data); });
+      });
+  }, { timeout: 2500 });
+}
+/** Ganti akun di perangkat yang sama → cache memori milik akun sebelumnya dibuang */
+Hooks.login.push(function () {
+  LmsIdx.m = {}; LC.mem = {};
+  if (typeof LmsOpsi !== 'undefined') Object.keys(LmsOpsi).forEach(function (k) { delete LmsOpsi[k]; });
+});

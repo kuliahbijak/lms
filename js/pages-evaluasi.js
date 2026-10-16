@@ -31,7 +31,7 @@ registerPage('guru', 'bukunilai', {
   },
   muat: function (el, kid) {
     var self = this, box = $('#bnBody', el);
-    api('nilai.buku', { kursus_id: kid }).then(function (r) {
+    apiLR('nilai.buku', { kursus_id: kid }, function (r) {
       if (!r.success) { box.innerHTML = errorBox(r.message); return; }
       self.d = r.data; self.kid = kid; self.ubah = {}; self.gambar(el);
     });
@@ -272,7 +272,7 @@ registerPage('guru', 'rubrik', {
     var self = this;
     el.innerHTML = pageHead('E-Learning <span>/ Rubrik</span>', 'Rubrik & Panduan Penilaian', 'Penilaian transparan dan konsisten untuk tugas esai atau proyek. Siswa melihat rubrik sebelum mengumpulkan.', '<button class="btn btn-dark" id="rbBaru">' + ic('plus') + 'Rubrik baru</button>') + '<div id="rbList" class="grid g2"><div class="sk" style="height:200px"></div></div>';
     $('#rbBaru', el).onclick = function () { editorRubrik(null, function () { self.render(el); }); };
-    api('rubrik.list', {}).then(function (r) {
+    apiLR('rubrik.list', {}, function (r) {
       if (!r.success) { $('#rbList', el).innerHTML = errorBox(r.message); return; }
       var list = r.data.rubrik;
       $('#rbList', el).innerHTML = list.length ? list.map(function (x) { return '<div class="card card-p"><div class="row"><h3 class="grow">' + esc(x.nama) + '</h3><span class="bdg ' + (x.jenis === 'panduan' ? 'info' : 'navy') + '">' + (x.jenis === 'panduan' ? 'Panduan' : 'Rubrik') + '</span></div><div class="xs muted mt4">' + x.kriteria.length + ' kriteria • dipakai ' + x.dipakai + ' tugas • oleh ' + esc(x.pemilik) + '</div><div class="mt12 rb-mini">' + rubrikTabel(x, {}, false) + '</div><div class="row gap8 mt12">' + (x.milikSaya ? '<button class="btn btn-outline btn-sm" data-ed="' + esc(x.rubrik_id) + '">' + ic('pencil') + 'Ubah</button>' : '') + '<button class="btn btn-ghost btn-sm" data-dup="' + esc(x.rubrik_id) + '">' + ic('copy') + 'Duplikat</button>' + (x.milikSaya ? '<button class="btn btn-ghost btn-sm" data-del="' + esc(x.rubrik_id) + '">' + ic('trash-2') + 'Hapus</button>' : '') + '</div></div>'; }).join('') : '<div class="card card-p" style="grid-column:1/-1">' + emptyHtml('Belum ada rubrik', 'Buat rubrik lalu pilih di pengaturan tugas.', 'grid-3x3') + '</div>';

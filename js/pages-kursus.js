@@ -44,15 +44,42 @@ daftarHalaman(['guru', 'siswa'], 'kursus', function (peran) { return {
     }
     if ($('#ksTab', el)) $$('#ksTab button', el).forEach(function (b) { b.onclick = function () { filter = b.dataset.f; $$('#ksTab button', el).forEach(function (x) { x.classList.toggle('on', x === b); }); if (data) draw(); }; });
     if ($('#ksBaru', el)) $('#ksBaru', el).onclick = function () { formKursus(null, function (id) { go('kursus', id); }); };
-    swr('lms:kursus', 'lms.kursus.list', {}, function (d) { data = d; if ($('#ksBaru', el)) $('#ksBaru', el).hidden = !d.bolehBuat; draw(); }, { fresh: 20000, onError: function (r) { $('#ksList', el).innerHTML = errorBox(r.message); } });
+    swr('lms:kursus', 'lms.kursus.list', {}, function (d) { data = d; if ($('#ksBaru', el)) $('#ksBaru', el).hidden = !d.bolehBuat; draw();
+      prefetchKursus((d.kursus || []).filter(function (k) { return k.status === 'Aktif'; }).map(function (k) { return k.kursus_id; }));   // v3.1: buka kursus seketika
+    }, { fresh: 20000, onError: function (r) { $('#ksList', el).innerHTML = errorBox(r.message); } });
   },
   // ------------------------------------------------------------ DETAIL KURSUS
   detail: function (el, kid, segar) {
     var self = this;
     if (!segar || !el.querySelector('.kursus-head')) el.innerHTML = '<div class="sk" style="height:140px"></div><div class="sk mt16" style="height:320px"></div>';
-    swr('lms:k:' + kid, 'lms.kursus.get', { kursus_id: kid }, function (d) { self.k = d; self.gambar(el); }, { fresh: segar ? 0 : 15000, force: !!segar, onError: function (r) { el.innerHTML = errorBox(r.message) + '<div class="mt16"><a class="btn btn-outline" href="#/kursus">' + ic('arrow-left') + 'Kembali ke daftar kursus</a></div>'; } });
+    swr('lms:k:' + kid, 'lms.kursus.get', { kursus_id: kid }, function (d) {
+      self.k = d; LmsIdx.isi(d); self.gambar(el); prefetchAktivitas(d);
+      if (d.kursus.kelola && !LmsOpsi[kid]) (window.requestIdleCallback || setTimeout)(function () { lmsOpsi(kid); });   // v3.1: editor terbuka seketika
+    }, { fresh: segar ? 0 : 15000, force: !!segar, onError: function (r) { el.innerHTML = errorBox(r.message) + '<div class="mt16"><a class="btn btn-outline" href="#/kursus">' + ic('arrow-left') + 'Kembali ke daftar kursus</a></div>'; } });
   },
   segarkan: function (el) { Store.del(userKey('lms:kursus')); this.detail(el, this.k.kursus.kursus_id, true); },
+  /** v3.1: gambar ulang dari data lokal (tanpa server) + simpan ke cache perangkat */
+  lokal: function (el) {
+    var kid = this.k.kursus.kursus_id, y = window.scrollY;
+    Store.set(userKey('lms:k:' + kid), { t: Date.now(), h: hashStr(JSON.stringify(this.k)), data: this.k });
+    LmsIdx.isi(this.k);
+    this.isiTab(el); window.scrollTo(0, y);
+  },
+  /** v3.1: antrean simpan di latar — berurutan per kursus; gagal → tampilan dikembalikan dari server */
+  antre: function (el, aksi, data, segarSenyap) {
+    var self = this, kid = this.k.kursus.kursus_id;
+    function st(t, c) { var x = $('#kmSt', el); if (x) { x.className = 'xs simpan-st ' + (c || 'muted'); x.innerHTML = t; } }
+    self._n = (self._n || 0) + 1; st(ic('loader-circle', 'spin') + ' Menyimpan…');
+    self._q = (self._q || Promise.resolve()).then(function () { return api(aksi, data); }).then(function (r) {
+      self._n = Math.max(0, self._n - 1);
+      if (!r.success) { self._n = 0; toast((r.message || 'Gagal menyimpan.') + ' Tampilan dikembalikan.', 'bad'); self.segarkan(el); return; }
+      lmsBasiLunak('lms:kursus');
+      if (self._n) return;
+      st(ic('check') + ' Tersimpan', 'ok-t');
+      if (segarSenyap) swr('lms:k:' + kid, 'lms.kursus.get', { kursus_id: kid }, function (d) { if (currentRoute().param === kid) { self.k = d; LmsIdx.isi(d); self.gambar(el); } }, { force: true, silent: true });
+    });
+    return self._q;
+  },
   gambar: function (el) {
     var self = this, d = this.k, k = d.kursus, kelola = k.kelola;
     self.tab = self.tab && (kelola || /^(materi|nilai)$/.test(self.tab)) ? self.tab : 'materi';
@@ -93,7 +120,7 @@ daftarHalaman(['guru', 'siswa'], 'kursus', function (peran) { return {
         '<div class="mod-list">' + (mods.length ? mods.map(function (m, i) { return modBaris(m, kelola, i, mods.length); }).join('') : '<div class="muted small mod-kosong">' + (kelola ? 'Belum ada aktivitas. Tambahkan materi, kuis, tugas, forum…' : 'Belum ada materi.') + '</div>') + '</div>' +
         (kelola ? '<button class="btn btn-soft btn-sm mt12" data-tambah="' + esc(s.seksi_id) + '">' + ic('plus') + 'Tambah aktivitas / sumber belajar</button>' : '') + '</section>';
     }).join('');
-    body.innerHTML = (kelola ? '<div class="row wrap gap8 mb12"><button class="btn btn-outline btn-sm" id="kmSeksi">' + ic('list-plus') + 'Tambah ' + (k.format === 'mingguan' ? 'Pekan' : 'Seksi') + '</button><a class="btn btn-outline btn-sm" href="#/bukunilai/' + esc(k.kursus_id) + '">' + ic('table-2') + 'Buku Nilai</a><a class="btn btn-outline btn-sm" href="#/banksoal/' + esc(k.kursus_id) + '">' + ic('list-checks') + 'Bank Soal</a><span class="sp"></span><span class="xs muted">' + ic('info') + ' Klik judul untuk membuka. Gunakan ↑ ↓ untuk mengurutkan.</span></div>' : '') +
+    body.innerHTML = (kelola ? '<div class="row wrap gap8 mb12"><button class="btn btn-outline btn-sm" id="kmSeksi">' + ic('list-plus') + 'Tambah ' + (k.format === 'mingguan' ? 'Pekan' : 'Seksi') + '</button><a class="btn btn-outline btn-sm" href="#/bukunilai/' + esc(k.kursus_id) + '">' + ic('table-2') + 'Buku Nilai</a><a class="btn btn-outline btn-sm" href="#/banksoal/' + esc(k.kursus_id) + '">' + ic('list-checks') + 'Bank Soal</a><span class="sp"></span><span class="xs muted simpan-st" id="kmSt">' + ic('info') + ' Klik judul untuk membuka. Gunakan ↑ ↓ untuk mengurutkan.</span></div>' : '') +
       (html || '<div class="card card-p">' + emptyHtml('Kursus masih kosong', '', 'layers') + '</div>');
     body.onclick = async function (e) {
       var b = e.target.closest('button'); if (!b) return;
@@ -101,28 +128,42 @@ daftarHalaman(['guru', 'siswa'], 'kursus', function (peran) { return {
       if (b.dataset.tambah) return pilihTipeModul(function (tipe) { editorModul(self.k, { tipe: tipe, seksi_id: b.dataset.tambah }, function () { self.segarkan(el); }); });
       if (b.dataset.sk) return self.aksiSeksi(el, b.dataset.sk, sid);
       var row = b.closest('[data-mod]'); if (!row) return;
-      var mid = row.dataset.mod, m = self.k.modul.filter(function (x) { return x.modul_id === mid; })[0];
+      var mid = row.dataset.mod, m = self.k.modul.filter(function (x) { return x.modul_id === mid; })[0], kid0 = self.k.kursus.kursus_id;
+      if (!m) return;
       if (b.dataset.m === 'edit') return editorModul(self.k, { modul: m }, function () { self.segarkan(el); });
-      if (b.dataset.m === 'manual') { btnBusy(b, true); var r0 = await api('lms.selesai.manual', { modul_id: mid, selesai: m.status !== 'selesai' }); btnBusy(b, false); if (toastRes(r0)) self.segarkan(el); return; }
-      if (b.dataset.m === 'hapus') { if (!await confirmBox('Hapus "' + m.judul + '"? Semua kiriman, nilai, dan data siswa di aktivitas ini ikut terhapus.', { danger: true, ok: 'Hapus' })) return; var r1 = await api('lms.modul.hapus', { modul_id: mid }); if (toastRes(r1)) self.segarkan(el); return; }
-      if (b.dataset.m === 'tampil') { var r2 = await api('lms.modul.urut', { kursus_id: self.k.kursus.kursus_id, tampil: { modul_id: mid, nilai: m.tampil === 'TIDAK' ? 'YA' : 'TIDAK' } }); if (toastRes(r2)) self.segarkan(el); return; }
+      // v3.1 turbo: semua aksi di bawah langsung terlihat (optimistik), lalu disimpan di latar secara berurutan
+      if (b.dataset.m === 'manual') {
+        var jadi = m.status !== 'selesai'; m.status = jadi ? 'selesai' : ''; self.lokal(el);
+        self.antre(el, 'lms.selesai.manual', { modul_id: mid, selesai: jadi }, true); return;
+      }
+      if (b.dataset.m === 'hapus') {
+        if (!await confirmBox('Hapus "' + m.judul + '"? Semua kiriman, nilai, dan data siswa di aktivitas ini ikut terhapus.', { danger: true, ok: 'Hapus' })) return;
+        self.k.modul = self.k.modul.filter(function (x) { return x !== m; }); self.lokal(el);
+        self.antre(el, 'lms.modul.hapus', { modul_id: mid }); return;
+      }
+      if (b.dataset.m === 'tampil') {
+        m.tampil = m.tampil === 'TIDAK' ? 'YA' : 'TIDAK'; self.lokal(el);
+        self.antre(el, 'lms.modul.urut', { kursus_id: kid0, tampil: { modul_id: mid, nilai: m.tampil } }); return;
+      }
       if (b.dataset.m === 'naik' || b.dataset.m === 'turun') {
         var list = self.k.modul.filter(function (x) { return x.seksi_id === m.seksi_id; }).sort(function (a, c) { return a.urutan - c.urutan; }), i = list.indexOf(m), j = b.dataset.m === 'naik' ? i - 1 : i + 1;
         if (j < 0 || j >= list.length) return;
         var t = list[i]; list[i] = list[j]; list[j] = t;
-        var r3 = await api('lms.modul.urut', { kursus_id: self.k.kursus.kursus_id, urutan: list.map(function (x) { return { modul_id: x.modul_id, seksi_id: x.seksi_id }; }) });
-        if (toastRes(r3, 'Urutan disimpan.')) self.segarkan(el);
+        list.forEach(function (x, n) { x.urutan = n + 1; }); self.lokal(el);
+        var tujuan = $('[data-mod="' + mid + '"] [data-m="' + b.dataset.m + '"]', el); if (tujuan && !tujuan.disabled) tujuan.focus({ preventScroll: true });
+        self.antre(el, 'lms.modul.urut', { kursus_id: kid0, urutan: list.map(function (x) { return { modul_id: x.modul_id, seksi_id: x.seksi_id }; }) });
       }
     };
-    if ($('#kmSeksi', el)) $('#kmSeksi', el).onclick = async function () { var r = await api('lms.seksi.save', { kursus_id: k.kursus_id }); if (toastRes(r)) self.segarkan(el); };
+    if ($('#kmSeksi', el)) $('#kmSeksi', el).onclick = async function () { btnBusy(this, true); var r = await api('lms.seksi.save', { kursus_id: k.kursus_id }); btnBusy(this, false); if (toastRes(r)) self.segarkan(el); };
   },
   aksiSeksi: async function (el, aksi, sid) {
     var self = this, s = this.k.seksi.filter(function (x) { return x.seksi_id === sid; })[0], kid = this.k.kursus.kursus_id;
-    if (aksi === 'tampil') { var r = await api('lms.seksi.save', { kursus_id: kid, seksi_id: sid, tampil: s.tampil === 'TIDAK' ? 'YA' : 'TIDAK' }); if (toastRes(r)) self.segarkan(el); return; }
+    if (aksi === 'tampil') { s.tampil = s.tampil === 'TIDAK' ? 'YA' : 'TIDAK'; self.lokal(el); self.antre(el, 'lms.seksi.save', { kursus_id: kid, seksi_id: sid, tampil: s.tampil }); return; }   // v3.1 optimistik
     if (aksi === 'hapus') {
       var isi = this.k.modul.filter(function (m) { return m.seksi_id === sid; }).length;
       if (!await confirmBox('Hapus seksi "' + s.judul + '"' + (isi ? ' beserta ' + isi + ' aktivitas di dalamnya' : '') + '?', { danger: true, ok: 'Hapus' })) return;
-      var r2 = await api('lms.seksi.hapus', { kursus_id: kid, seksi_id: sid, hapusIsi: true }); if (toastRes(r2)) self.segarkan(el); return;
+      self.k.seksi = self.k.seksi.filter(function (x) { return x !== s; }); self.k.modul = self.k.modul.filter(function (m) { return m.seksi_id !== sid; }); self.lokal(el);   // v3.1 optimistik
+      self.antre(el, 'lms.seksi.hapus', { kursus_id: kid, seksi_id: sid, hapusIsi: true }); return;
     }
     var m = modal({ title: 'Ubah Seksi', size: 'lg', body: '<div class="field"><label>Judul</label><input class="inp" name="judul" value="' + esc(s.judul) + '"></div><div class="field mt12"><label>Ringkasan (mendukung **tebal**, daftar, tautan)</label><textarea class="inp" name="ringkasan" rows="4">' + esc(s.ringkasan || '') + '</textarea></div>' +
       '<div class="mt16"><div class="xs b muted">SYARAT MEMBUKA SEKSI</div><div id="skSyarat" class="mt8"></div></div>',
@@ -134,7 +175,7 @@ daftarHalaman(['guru', 'siswa'], 'kursus', function (peran) { return {
   tabPeserta: function (el, body) {
     var self = this, kid = this.k.kursus.kursus_id;
     body.innerHTML = '<div class="sk" style="height:260px"></div>';
-    api('lms.peserta.list', { kursus_id: kid }).then(function (r) {
+    apiLR('lms.peserta.list', { kursus_id: kid }, function (r) {
       if (!r.success) { body.innerHTML = errorBox(r.message); return; }
       var d = r.data, gNama = {}; d.grup.forEach(function (g) { gNama[g.grup_id] = g.nama; });
       body.innerHTML = '<div class="grid g-main"><div class="card"><div class="card-h"><div class="grow"><h3>' + ic('users') + ' Peserta (' + d.siswa.length + ' siswa)</h3><p>Otomatis dari kelas kursus + tambahan manual</p></div><button class="btn btn-outline btn-sm" id="psTambah">' + ic('user-plus') + 'Tambah peserta</button></div>' +
@@ -193,7 +234,7 @@ daftarHalaman(['guru', 'siswa'], 'kursus', function (peran) { return {
   tabLaporan: function (el, body) {
     var kid = this.k.kursus.kursus_id;
     body.innerHTML = '<div class="sk" style="height:260px"></div>';
-    api('lms.laporan.selesai', { kursus_id: kid }).then(function (r) {
+    apiLR('lms.laporan.selesai', { kursus_id: kid }, function (r) {
       if (!r.success) { body.innerHTML = errorBox(r.message); return; }
       var d = r.data, simbol = { selesai: ['circle-check', 'ok-t', 'Selesai'], lulus: ['circle-check-big', 'ok-t', 'Lulus'], gagal: ['circle-x', 'bad-t', 'Belum lulus'] };
       body.innerHTML = '<div class="card"><div class="card-h"><div class="grow"><h3>' + ic('chart-column') + ' Laporan Penyelesaian</h3><p>' + d.baris.filter(function (b) { return b.lulus; }).length + ' dari ' + d.baris.length + ' siswa lulus kursus</p></div><button class="btn btn-outline btn-sm" id="lpCsv">' + ic('download') + 'CSV</button></div>' +
@@ -228,7 +269,7 @@ daftarHalaman(['guru', 'siswa'], 'kursus', function (peran) { return {
   tabNilai: function (el, body) {
     var kid = this.k.kursus.kursus_id;
     body.innerHTML = '<div class="sk" style="height:220px"></div>';
-    api('nilai.saya', { kursus_id: kid }).then(function (r) {
+    apiLR('nilai.saya', { kursus_id: kid }, function (r) {
       if (!r.success) { body.innerHTML = errorBox(r.message); return; }
       var d = r.data;
       if (d.disembunyikan) { body.innerHTML = '<div class="card card-p">' + emptyHtml('Nilai kursus belum dibagikan guru', '', 'eye-off') + '</div>'; return; }
@@ -354,7 +395,8 @@ function editorSyarat(wadah, syarat, d, kecualiId) {
 // ---------------------------------------------------------------- Editor modul (aktivitas & sumber belajar)
 async function editorModul(d, o, selesai) {
   var m0 = o.modul, tipe = m0 ? m0.tipe : o.tipe, k = m0 ? m0.konten : {}, kid = d.kursus.kursus_id;
-  var op = await lmsOpsi(kid, true); if (!op) return toast('Gagal memuat opsi.', 'bad');
+  var op = LmsOpsi[kid] || await lmsOpsi(kid); if (!op) return toast('Gagal memuat opsi.', 'bad');   // v3.1: dari cache
+  if (LmsOpsi[kid]) lmsOpsi(kid, true);                                                       // segarkan di latar untuk berikutnya
   var dinilai = /^(kuis|tugas|forum|workshop|pelajaran)$/.test(tipe);
   var tabs = [['umum', 'Umum'], ['konten', 'Konten']].concat(dinilai ? [['nilai', 'Penilaian']] : []).concat(tipe !== 'label' ? [['selesai', 'Penyelesaian'], ['akses', 'Akses & Syarat']] : []);
   var m = modal({ title: (m0 ? 'Ubah ' : 'Tambah ') + tipeLabel(tipe), sub: d.kursus.nama, size: 'xl',

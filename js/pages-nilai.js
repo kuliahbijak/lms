@@ -163,7 +163,7 @@ registerPage('guru', 'laporan', {
   init: function (el) {
     var st = this.st, self = this;
     el.innerHTML = pageHead('<span class="amber">●</span> SIAKAD SISWA Analytics Hub <span>• Tahun Ajaran ' + esc(cfg('TAHUN_AJARAN', '')) + '</span>', 'Laporan & Analitik Akademik', 'Pantau performa pembelajaran, rekapitulasi kehadiran berkala, distribusi nilai semester, dan ekspor laporan terpadu berbasis Google Sheets.',
-      '<button class="btn btn-outline" id="lPrint">' + ic('printer') + 'Cetak Raport (PDF)</button><button class="btn btn-dark" id="lSheets">' + ic('sheet') + 'Ekspor Data (Excel/Sheets)</button>') +
+      '<button class="btn btn-outline" id="lPrint">' + ic('file-down') + 'Unduh Laporan (PDF/Excel)</button><button class="btn btn-dark" id="lSheets">' + ic('sheet') + 'Ekspor Data (Excel/Sheets)</button>') +
       '<div class="card"><div class="toolbar"><div class="field"><label class="lbl">Jenjang & Tingkat</label><select class="sel" id="lJenjang"><option value="">Semua Jenjang</option><option>SD</option><option>SMP</option><option>SMA</option></select></div><div class="field"><label class="lbl">Rombel / Kelas</label><select class="sel" id="lKelas"></select></div>' +
       '<div class="field"><label class="lbl">Mata Pelajaran</label><select class="sel" id="lMapel"></select></div><div class="field"><label class="lbl">Periode Kehadiran</label><select class="sel" id="lPeriode"></select></div><button class="btn btn-dark" id="lApply">' + ic('sliders-horizontal') + 'Terapkan</button></div></div>' +
       '<div class="grid g4 mt24" id="lKpi"></div>' +
@@ -176,7 +176,7 @@ registerPage('guru', 'laporan', {
     $('#lQ', el).oninput = debounce(function () { st.q = this.value.toLowerCase(); st.page = 1; self.table(el); }, 250);
     $$('#lSeg button', el).forEach(function (b) { b.onclick = function () { st.seg = b.dataset.s; st.page = 1; self.table(el); }; });
     $$('#lTrTabs button', el).forEach(function (b) { b.onclick = function () { st.trend = b.dataset.t; self.trend(el); }; });
-    $('#lPrint', el).onclick = function () { window.print(); };
+    $('#lPrint', el).onclick = function () { LapBerkas.buka({ kelas_id: st.kelas }); };   // v3.1: berkas PDF/Excel resmi (bukan cetak layar)
     $('#lSheets', el).onclick = function () { self.exportSheets(this); };
     $('#lSync', el).onclick = async function () { btnBusy(this, true); await refreshBoot(true); btnBusy(this, false); toast('Data laporan tersinkron.', 'ok'); };
     $('#lDapodik', el).onclick = function () { self.dapodik(); };
