@@ -1,0 +1,439 @@
+/* DIBUAT OTOMATIS oleh tools/tema-gelap.js dari style.css & v3.css — jangan diedit manual. */
+
+/* ---- dari style.css ---- */
+:root[data-mode="gelap"] a {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .navy {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .login-wrap {
+    background: radial-gradient(900px 500px at 85% -10%, var(--info-bg) 0, transparent 60%), radial-gradient(700px 400px at 0% 110%, var(--amber-bg) 0, transparent 60%), var(--bg)
+}
+:root[data-mode="gelap"] .login-card::before {
+    background: radial-gradient(closest-side, var(--surface-2), transparent)
+}
+:root[data-mode="gelap"] .seg button.on {
+    background: var(--surface);
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .demo-box {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .demo-box button {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .inp, :root[data-mode="gelap"] .sel, :root[data-mode="gelap"] textarea.inp {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .sel {
+    background: var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%2393A0B7' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E") no-repeat right 10px center
+}
+:root[data-mode="gelap"] .toggle span {
+    background: var(--surface-3)
+}
+:root[data-mode="gelap"] .btn-outline {
+    background: var(--surface);
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .btn-soft {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .btn-ghost:hover {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .btn-danger:hover {
+    background: var(--bad-bg)
+}
+:root[data-mode="gelap"] .btn-ic:hover {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .btn.loading::after {
+    border: 2px solid var(--line)
+}
+:root[data-mode="gelap"] .topbar {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .bell .dot {
+    border: 2px solid var(--line)
+}
+:root[data-mode="gelap"] .demo-ribbon {
+    border-bottom: 1px solid var(--line)
+}
+:root[data-mode="gelap"] .kpi .ki {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .pill {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .bdg {
+    background: var(--surface-2);
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .grade {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .av.c3 {
+    background: var(--info-bg);
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .tabs.light button.on {
+    background: var(--surface);
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .chip {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .chip i {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .tbl th {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .tbl tbody tr:hover {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .tbl tr.warnrow {
+    background: var(--bad-bg)
+}
+:root[data-mode="gelap"] .tbl tr.warnrow:hover {
+    background: var(--bad-bg)
+}
+:root[data-mode="gelap"] .tbl tr.sel {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .tbl input.cell {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .tbl input.cell.low {
+    background: var(--bad-bg)
+}
+:root[data-mode="gelap"] .tbl input.cell.changed {
+    background: var(--amber-bg)
+}
+:root[data-mode="gelap"] .tbl .col-hl {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .pager .pg button {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .list-i .ic {
+    background: var(--surface);
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .sched {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .cam-selfie .oval {
+    border: 3px dashed var(--line)
+}
+:root[data-mode="gelap"] .radar .pulse {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .modal {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .drawer {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .viewer-tabs button.on {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .toast {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .sheet-menu {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .sk {
+    background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-2) 37%, var(--surface-2) 63%)
+}
+:root[data-mode="gelap"] .wa-preview {
+    background: var(--ok-bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%2393A0B7' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E")
+}
+:root[data-mode="gelap"] .wa-bubble {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .wa-badge.belum {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .seg-batch button {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .step-h {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .drop {
+    border: 1.5px dashed var(--line);
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .drop:hover, :root[data-mode="gelap"] .drop.over {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .drop .ic {
+    background: var(--surface);
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .sticky-bar {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .kbd {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .timeline .ti::before {
+    border: 2px solid var(--line)
+}
+:root[data-mode="gelap"] .heat i {
+    background: var(--surface-2)
+}
+@media (max-width: 767px) {
+    :root[data-mode="gelap"] .bottom-nav {
+        background: var(--surface)
+    }
+}
+@media (max-width: 767px) {
+    :root[data-mode="gelap"] .bottom-nav a.on {
+        color: var(--aksen)
+    }
+}
+:root[data-mode="gelap"] .geo-chip.ok {
+    border-color: var(--line)
+}
+:root[data-mode="gelap"] .ic-box {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .presensi-banner {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .presensi-banner.todo {
+    border-color: var(--line)
+}
+:root[data-mode="gelap"] .presensi-banner.in > .lucide {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .tg-item {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .tg-ic {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .vcard .bukti-thumb {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .tgb-body {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .tgb-body iframe {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .tgm-bar button {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .tgm-chip.on {
+    color: var(--aksen)
+}
+
+/* ---- dari v3.css ---- */
+:root[data-mode="gelap"] .chips-pilih .chk, :root[data-mode="gelap"] .cek-list .chk {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .chips-pilih .chk:has(input:checked), :root[data-mode="gelap"] .cek-list .chk:has(input:checked) {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .danger-zone {
+    border-color: var(--line)
+}
+:root[data-mode="gelap"] .lms-frame {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .mdx code {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .wiki-link {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .tipe-ic {
+    background: color-mix(in srgb, var(--tc) 12%, var(--surface))
+}
+:root[data-mode="gelap"] .big-num {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .big-mid {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .kc-band .bdg {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .kc-format {
+    border: 1px solid var(--line)
+}
+:root[data-mode="gelap"] .kursus-head .bdg {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .kh-prog .bdg.ok {
+    background: var(--ok-bg)
+}
+:root[data-mode="gelap"] .seksi.tersembunyi {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .mod-t:hover {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .mod-st.manual:hover {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .grup-i {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .tbl .stick {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .tbl th.stick {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .tbl tfoot td {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .tbl tfoot td.stick {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .tipe-pilih {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .berkas-i {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .berkas-i > .lucide {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .kz-timer {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .kz-nav button {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .kz-nav button.isi {
+    border-color: var(--line);
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .kz-o {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .kz-huruf {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .kz-bs button {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .dd-gap {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .dd-gap.over {
+    background: var(--amber-bg)
+}
+:root[data-mode="gelap"] .dd-gap.isi {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .dd-chip {
+    background: var(--surface);
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .kz-skor {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .esai-nilai {
+    background: var(--amber-bg);
+    border-color: var(--line)
+}
+:root[data-mode="gelap"] .rb-sel b {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] table.rubrik td.kosong {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .forum-i:hover {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .post {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .post.lv1 {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .post.lv2, :root[data-mode="gelap"] .post.lv3 {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .balas-box {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .abjad button {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .glos-i.menunggu {
+    border-color: var(--line);
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .ws-step span {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .ws-step .kini {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .skala span {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .kv-plat {
+    background: color-mix(in srgb, var(--pc) 12%, var(--surface))
+}
+:root[data-mode="gelap"] table.bn .kat-h {
+    color: var(--aksen);
+    border-left: 2px solid var(--line)
+}
+:root[data-mode="gelap"] table.bn .sub-h, :root[data-mode="gelap"] table.bn td.sub {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .sel-n.timpa {
+    background: var(--amber-bg)
+}
+:root[data-mode="gelap"] #bnSimpanBar {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .soal-row:hover {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .chat-i:hover {
+    background: var(--surface-2)
+}
+:root[data-mode="gelap"] .chat-i.baru b {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .peran-guru {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .chat-main {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .chat-h {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .bubble.lawan {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .chat-tulis {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .gsa-lbl .lucide {
+    color: var(--aksen)
+}
+:root[data-mode="gelap"] .br-swatch {
+    border: 2px solid var(--line)
+}
+:root[data-mode="gelap"] .bp-login {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .lap-pilih button {
+    background: var(--surface)
+}
+:root[data-mode="gelap"] .lap-pilih button .lucide {
+    color: var(--aksen)
+}

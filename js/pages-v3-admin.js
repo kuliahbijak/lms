@@ -110,7 +110,8 @@ registerPage('guru', 'keamanan2', {
       '<div class="grid g2 mt16"><div class="card card-p"><h3>' + ic('timer-reset') + ' Sesi Aman</h3><dl class="kv-list mt8"><dt>Masa sesi</dt><dd>' + d.sesiJam + ' jam (Super Admin maks ' + d.saSesiJam + ' jam)</dd><dt>Token</dt><dd>HMAC-SHA256, dicek ulang tiap permintaan (akun aktif & peran)</dd><dt>Enkripsi pesan</dt><dd>' + (d.enkripsi ? '<span class="bdg ok">aktif</span> aliran kunci HMAC-SHA256 + MAC, kunci di Script Properties' : '<span class="bdg amber">belum — jalankan setupV30()</span>') + '</dd><dt>Transport</dt><dd>HTTPS (Apps Script & GitHub Pages)</dd></dl>' +
       '<div class="field mt12"><label>Keluar otomatis bila tidak aktif (menit, 0 = nonaktif)</label><input class="inp" type="number" min="0" max="360" id="k2Idle" value="' + esc(p.idleMenit) + '" style="max-width:140px"></div>' +
       '<div class="field mt12"><label>Batas permintaan per pengguna per menit</label><input class="inp" type="number" min="30" max="1000" id="k2Rate" value="' + esc(p.rateMenit) + '" style="max-width:140px"></div>' +
-      '<label class="chk mt12"><input type="checkbox" id="k2Lacak"' + (p.lacakHalaman ? ' checked' : '') + '> Catat halaman yang diakses & durasinya</label></div>' +
+      '<label class="chk mt12"><input type="checkbox" id="k2Lacak"' + (p.lacakHalaman ? ' checked' : '') + '> Catat halaman yang diakses & durasinya</label>' +
+      '<label class="chk mt12"><input type="checkbox" id="k2Cap"' + (cfg('CAPTCHA_LOGIN', 'YA') !== 'TIDAK' ? ' checked' : '') + '> Wajib captcha penjumlahan saat login (cegah bot & tebak sandi)</label></div>' +
       '<div class="card card-p"><h3>' + ic('shield-ban') + ' Proteksi Spam</h3><div class="grid-form mt8"><div class="field c4"><label>Postingan/menit (siswa)</label><input class="inp" type="number" min="1" id="k2Sp" value="' + esc(p.spamMenit) + '"></div><div class="field c4"><label>Pesan/menit (siswa)</label><input class="inp" type="number" min="1" id="k2Ps" value="' + esc(p.pesanMenit) + '"></div><div class="field c4"><label>Maks tautan/postingan</label><input class="inp" type="number" min="0" id="k2Ln" value="' + esc(p.spamLink) + '"></div>' +
       '<div class="field c12"><label>Kata terlarang (satu per baris)</label><textarea class="inp" id="k2Kt" rows="4" placeholder="kata kasar…">' + esc((p.kataTerlarang || []).join('\n')) + '</textarea></div></div><div class="xs muted">Konten duplikat dalam 10 menit juga otomatis ditolak.</div></div></div>' +
       '<div class="sticky-bar mt16"><span class="grow small muted">Perubahan berlaku segera untuk semua pengguna.</span><button class="btn btn-primary" id="k2Save">' + ic('save') + 'Simpan kebijakan</button></div>' +
@@ -118,6 +119,11 @@ registerPage('guru', 'keamanan2', {
     $('#k2Gen', el).onclick = function () { $('#k2Sec', el).value = secretAcak(36); };
     $('#k2SecC', el).onclick = function () { if ($('#k2Sec', el).value) salinTeks($('#k2Sec', el).value); };
     $('#k2SkC', el).onclick = function () { salinTeks(WORKER_SKRIP); };
+    if ($('#k2Cap', el)) $('#k2Cap', el).onchange = async function () {          // v3.2: captcha login
+      var cb = this, on = cb.checked; cb.disabled = true;
+      var r = await api('captcha.atur', { aktif: on ? 'YA' : 'TIDAK' }); cb.disabled = false;
+      if (toastRes(r)) { if (AppState.boot && AppState.boot.cfg) AppState.boot.cfg.CAPTCHA_LOGIN = on ? 'YA' : 'TIDAK'; } else cb.checked = !on;
+    };
     $('#k2Save', el).onclick = async function () {
       var k = { idleMenit: Number($('#k2Idle', el).value), rateMenit: Number($('#k2Rate', el).value), lacakHalaman: $('#k2Lacak', el).checked, spamMenit: Number($('#k2Sp', el).value), pesanMenit: Number($('#k2Ps', el).value), spamLink: Number($('#k2Ln', el).value), kataTerlarang: $('#k2Kt', el).value, ipWajibProxy: $('#k2Wp', el).checked, ipDaftar: $('#k2IpL', el).value };
       if (!$('#k2Mode', el).disabled) k.saLoginMode = $('#k2Mode', el).value;

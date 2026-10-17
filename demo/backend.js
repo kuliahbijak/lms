@@ -7715,6 +7715,655 @@ function setupV31() {
 if (typeof pasangEkstensi_ === 'function' && typeof SCHEMA !== 'undefined') pasangEkstensi_();
 
 ;
+// ==== Pertemuan.gs ====
+/**
+ * =====================================================================
+ *  SIAKAD SISWA v3.2 — Pertemuan.gs : Mapel & Pertemuan, Absensi per Pertemuan, Jurnal Mengajar
+ *  - Target pertemuan per mapel (berlaku semua kelas) + pengecualian per kelas
+ *  - Setiap pertemuan: jurnal (Elemen/CP/TP, materi pokok, kegiatan, refleksi), materi & tugas
+ *    (tautan aktivitas LMS + catatan PR), absensi siswa (terisi otomatis dari absensi harian)
+ *    dan kehadiran guru (hadir / digantikan / dst.)
+ *  - % terlaksana = jumlah pertemuan berstatus "terlaksana" ÷ target
+ *  Sheet baru (aditif): TargetPertemuan, Pertemuan. Sheet lama TIDAK diubah.
+ *  Absensi per pertemuan disimpan ringkas di kolom `hadir` (1 baris = 1 pertemuan) → tetap ringan
+ *  walau data satu semester ribuan pertemuan. Cache per kelas, dibangun ulang saat ada perubahan.
+ * =====================================================================
+ */
+var EXT = (typeof EXT !== 'undefined' && EXT) || { schema: {}, seed: [], routes: [], tick: [], reset: [], hooks: {} };
+Object.assign(EXT.schema, {
+  TargetPertemuan: { key: 'target_id', prefix: 'TPM', cols: ['target_id', 'mata_pelajaran', 'kelas_id', 'jumlah', 'diperbarui_oleh', 'diperbarui_pada'] },
+  Pertemuan: { key: 'pertemuan_id', prefix: 'PTM', cols: ['pertemuan_id', 'kelas_id', 'mata_pelajaran', 'guru_id', 'tahun_ajaran', 'semester', 'pertemuan_ke', 'tanggal', 'jam_ke',
+    'jam_mulai', 'jam_selesai', 'elemen', 'capaian', 'tujuan', 'materi_pokok', 'kegiatan', 'refleksi', 'materi_ids', 'tugas_lms', 'catatan_tugas', 'status', 'hadir',
+    'guru_hadir', 'guru_pengganti', 'guru_jam', 'dibuat_oleh', 'dibuat_pada', 'diperbarui_oleh', 'diperbarui_pada'] }
+});
+EXT.seed.push(['TARGET_PERTEMUAN', '16', 'Target pertemuan per mata pelajaran per semester bila belum diatur khusus']);
+function ptmKait_(nama, fn) { (EXT.hooks[nama] = EXT.hooks[nama] || []).push(fn); }
+
+var PTM_HADIR = { Hadir: 'H', Izin: 'I', Sakit: 'S', Alpha: 'A' }, PTM_KODE = { H: 'Hadir', I: 'Izin', S: 'Sakit', A: 'Alpha' };
+var PTM_GURU = ['Hadir', 'Digantikan', 'Izin', 'Sakit', 'Dinas Luar', 'Kosong'];
+var PTM_TEKS_MAKS = 3000;
+var _PTM = {};
+EXT.reset.push(function () { _PTM = {}; });
+
+// ---------------------------------------------------------------------
+// 1. BANTUAN
+// ---------------------------------------------------------------------
+function ptmNorm_(s) { return String(s || '').trim().replace(/\s+/g, ' ').toLowerCase(); }
+function ptmPeriode_() { return { ta: String(setting_('TAHUN_AJARAN', '')), sem: String(setting_('SEMESTER', '')) }; }
+function ptmSaya_(ctx) {
+  var s = ctx.session, u = userIdx_()[s.uid] || {};
+  return { uid: s.uid, peran: s.role, sa: s.role === 'superadmin', siswa: s.role === 'siswa', ref: String(s.ref || u.f || ''), nama: u.n || s.email, kelas: u.k || '' };
+}
+function ptmTeks_(v, maks) { return String(v === undefined || v === null ? '' : v).replace(/\r\n/g, '\n').trim().substring(0, maks || PTM_TEKS_MAKS); }
+function ptmJson_(s, def) { if (s && typeof s === 'object') return s; try { var v = JSON.parse(String(s || '')); return v === null || v === undefined ? def : v; } catch (e) { return def; } }
+function ptmTglOk_(t) { return /^\d{4}-\d{2}-\d{2}$/.test(String(t || '')); }
+function ptmGuruMap_() {
+  if (_PTM.gm) return _PTM.gm;
+  var m = {}; DB.all('Guru').forEach(function (g) { m[String(g.NUPTK)] = g; }); return (_PTM.gm = m);
+}
+function ptmKelasMap_() {
+  if (_PTM.km) return _PTM.km;
+  var m = {}; DB.all('Kelas').forEach(function (k) { m[k.kelas_id] = k; }); return (_PTM.km = m);
+}
+/** Kehadiran ringkas di kolom `hadir`: {"NIS":"H"} atau {"NIS":["S","keterangan"]} */
+function ptmHadirBaca_(s) {
+  var o = ptmJson_(s, {}), out = {};
+  Object.keys(o || {}).forEach(function (nis) { var v = o[nis]; if (Array.isArray(v)) out[nis] = { s: PTM_KODE[v[0]] ? v[0] : 'H', k: String(v[1] || '') }; else out[nis] = { s: PTM_KODE[v] ? v : 'H', k: '' }; });
+  return out;
+}
+function ptmRekap_(hadirStr) {
+  var h = ptmHadirBaca_(hadirStr), r = { H: 0, I: 0, S: 0, A: 0, n: 0 };
+  Object.keys(h).forEach(function (nis) { r[h[nis].s]++; r.n++; });
+  return r;
+}
+/** Siswa aktif sebuah kelas, urut nama */
+function ptmSiswaKelas_(kelas) {
+  return DB.all('Siswa').filter(function (s) { return s.kelas_id === kelas && (s.status || 'Aktif') === 'Aktif'; })
+    .sort(function (a, b) { return String(a.nama_lengkap).localeCompare(String(b.nama_lengkap), 'id'); });
+}
+/** Jadwal sebuah pasangan kelas–mapel (guru pengampu & jam) */
+function ptmJadwal_(kelas, mapel) {
+  var n = ptmNorm_(mapel);
+  return DB.all('Jadwal').filter(function (j) { return j.kelas_id === kelas && ptmNorm_(j.mata_pelajaran) === n; });
+}
+function ptmPengampu_(kelas, mapel) { var j = ptmJadwal_(kelas, mapel)[0]; return j ? String(j.guru_id || '') : ''; }
+
+// ---------------------------------------------------------------------
+// 2. TARGET PERTEMUAN
+// ---------------------------------------------------------------------
+function ptmTargetMap_() {
+  if (_PTM.tm) return _PTM.tm;
+  return (_PTM.tm = cached_('ptmT_' + ver_('ptmT'), 21600, function () {
+    var m = {}; DB.all('TargetPertemuan').forEach(function (t) { var j = num_(t.jumlah, 0); if (j > 0) m[(t.kelas_id || '') + '|' + ptmNorm_(t.mata_pelajaran)] = j; }); return m;
+  }));
+}
+function ptmTarget_(kelas, mapel) {
+  var m = ptmTargetMap_(), n = ptmNorm_(mapel);
+  if (m[kelas + '|' + n]) return { jumlah: m[kelas + '|' + n], sumber: 'kelas' };
+  if (m['|' + n]) return { jumlah: m['|' + n], sumber: 'mapel' };
+  return { jumlah: Math.max(1, num_(setting_('TARGET_PERTEMUAN', 16), 16)), sumber: 'bawaan' };
+}
+
+// ---------------------------------------------------------------------
+// 3. DATA PER KELAS (cache berversi per kelas — perubahan satu kelas tidak mendinginkan kelas lain)
+// ---------------------------------------------------------------------
+function ptmSemua_() { return DB.all('Pertemuan'); }
+function ptmRingan_(p) {
+  var mid = ptmJson_(p.materi_ids, []), tg = ptmJson_(p.tugas_lms, []);
+  return { pertemuan_id: p.pertemuan_id, ke: num_(p.pertemuan_ke, 0), tanggal: p.tanggal, jam_ke: p.jam_ke, jam_mulai: p.jam_mulai, jam_selesai: p.jam_selesai,
+    materi_pokok: String(p.materi_pokok || '').substring(0, 160), tujuan: String(p.tujuan || '').substring(0, 220), status: p.status || 'rencana',
+    guru_id: String(p.guru_id || ''), guru_hadir: p.guru_hadir || '', guru_pengganti: p.guru_pengganti || '', n_materi: mid.length, n_tugas: tg.length + (p.catatan_tugas ? 1 : 0),
+    rekap: ptmRekap_(p.hadir), hadir: ptmJson_(p.hadir, {}), dibuat_oleh: p.dibuat_oleh || '' };
+}
+function ptmKunciKelas_(kelas) { var per = ptmPeriode_(); return 'ptmK_' + kelas + '_' + hashKecil_(per.ta + '|' + per.sem) + '_' + ver_('ptmK_' + kelas) + '_' + ver_('ptm'); }
+function ptmBangunKelas_(kelas, rows) {
+  var per = ptmPeriode_(), m = {};
+  rows.forEach(function (p) {
+    if (p.kelas_id !== kelas || String(p.tahun_ajaran) !== per.ta || String(p.semester) !== per.sem) return;
+    var n = ptmNorm_(p.mata_pelajaran); (m[n] = m[n] || { mapel: p.mata_pelajaran, list: [] }).list.push(ptmRingan_(p));
+  });
+  Object.keys(m).forEach(function (n) { m[n].list.sort(function (a, b) { return a.ke - b.ke || String(a.tanggal).localeCompare(String(b.tanggal)); }); });
+  return { m: m };
+}
+function ptmKelas_(kelas) {
+  _PTM.k = _PTM.k || {};
+  if (_PTM.k[kelas]) return _PTM.k[kelas];
+  return (_PTM.k[kelas] = cached_(ptmKunciKelas_(kelas), 21600, function () { return ptmBangunKelas_(kelas, ptmSemua_()); }));
+}
+/** Setelah menulis: versi kelas dinaikkan & cache langsung dibangun dari data di memori (tanpa baca ulang sheet) */
+function ptmSegarkanKelas_(kelas, rowsBaru) {
+  bump_('ptmK_' + kelas, true);
+  if (_PTM.k) delete _PTM.k[kelas];
+  if (rowsBaru) { try { var d = ptmBangunKelas_(kelas, rowsBaru); CacheX.put(ptmKunciKelas_(kelas), d, 21600); (_PTM.k = _PTM.k || {})[kelas] = d; } catch (e) {} }
+}
+function ptmRingkasPasangan_(kelas, mapel, nisSaya) {
+  var k = ptmKelas_(kelas), info = k.m[ptmNorm_(mapel)] || { list: [] }, t = 0, r = 0, akhir = '', saya = nisSaya ? { H: 0, I: 0, S: 0, A: 0 } : null;
+  info.list.forEach(function (p) {
+    if (p.status === 'terlaksana') { t++; if (String(p.tanggal) > akhir) akhir = String(p.tanggal); if (saya) { var v = p.hadir[nisSaya]; var s = Array.isArray(v) ? v[0] : v; if (PTM_KODE[s]) saya[s]++; } }
+    else r++;
+  });
+  var tg = ptmTarget_(kelas, mapel);
+  var o = { terlaksana: t, rencana: r, terakhir: akhir, target: tg.jumlah, target_sumber: tg.sumber, persen: tg.jumlah ? Math.min(100, Math.round(t / tg.jumlah * 100)) : 0 };
+  if (saya) o.hadir_saya = saya;
+  return o;
+}
+
+// ---------------------------------------------------------------------
+// 4. API BACA
+// ---------------------------------------------------------------------
+/** ptm.ringkas — daftar mapel per kelas + % terlaksana. d: { kelas_id?, semua? } */
+function apiPtmRingkas(ctx, d) {
+  var me = ptmSaya_(ctx), per = ptmPeriode_(), km = ptmKelasMap_(), gm = ptmGuruMap_(), mode = 'saya', nis = '';
+  var jdw = DB.all('Jadwal');
+  if (me.siswa) {
+    var s = DB.find('Siswa', 'NIS', me.ref); if (!s) return fail_('Data siswa tidak ditemukan.');
+    nis = String(s.NIS); jdw = jdw.filter(function (j) { return j.kelas_id === s.kelas_id; }); mode = 'siswa';
+  } else if (d.kelas_id) { jdw = jdw.filter(function (j) { return j.kelas_id === d.kelas_id; }); mode = 'kelas'; }
+  else if (d.semua || me.sa || !me.ref) mode = 'semua';
+  else jdw = jdw.filter(function (j) { return String(j.guru_id) === me.ref; });
+  var seen = {}, out = [];
+  jdw.forEach(function (j) {
+    var key = j.kelas_id + '|' + ptmNorm_(j.mata_pelajaran);
+    if (seen[key]) { var ada = seen[key]; if (j.guru_id && ada.guru_ids.indexOf(String(j.guru_id)) === -1) { ada.guru_ids.push(String(j.guru_id)); ada.guru += ', ' + ((gm[j.guru_id] || {}).nama_lengkap || j.guru_id); } return; }
+    var k = km[j.kelas_id] || {}, g = gm[j.guru_id] || {};
+    var o = Object.assign({ kelas_id: j.kelas_id, nama_kelas: k.nama_kelas || j.kelas_id, mata_pelajaran: j.mata_pelajaran, guru_id: String(j.guru_id || ''), guru_ids: [String(j.guru_id || '')], guru: g.nama_lengkap || '' },
+      ptmRingkasPasangan_(j.kelas_id, j.mata_pelajaran, nis));
+    seen[key] = o; out.push(o);
+  });
+  out.sort(function (a, b) { return String(a.nama_kelas).localeCompare(String(b.nama_kelas), 'id') || String(a.mata_pelajaran).localeCompare(String(b.mata_pelajaran), 'id'); });
+  out.forEach(function (o) { delete o.guru_ids; });
+  return ok_({ periode: per, mode: mode, bawaan: ptmTarget_('', '').jumlah, pasangan: out, bolehAturMapel: me.sa });
+}
+
+/** Cek akses baca sebuah kelas: siswa hanya kelasnya sendiri */
+function ptmAksesKelas_(me, kelas) {
+  if (!me.siswa) return null;
+  var s = DB.find('Siswa', 'NIS', me.ref);
+  return s && s.kelas_id === kelas ? null : fail_('Anda hanya dapat melihat mata pelajaran kelas Anda.', { code: 'FORBIDDEN' });
+}
+function ptmBolehUbah_(me, p) {
+  if (me.siswa) return false;
+  if (me.sa) return true;
+  if (!p) return true;                                             // pertemuan baru: semua guru (guru pengganti) boleh
+  return String(p.guru_id) === me.ref || p.dibuat_oleh === me.uid;
+}
+
+/** ptm.list — pertemuan sebuah mapel di satu kelas. d: { kelas_id, mata_pelajaran } */
+function apiPtmList(ctx, d) {
+  var me = ptmSaya_(ctx), kelas = String(d.kelas_id || ''), mapel = ptmTeks_(d.mata_pelajaran, 80);
+  if (!kelas || !mapel) return fail_('Kelas dan mata pelajaran wajib dipilih.');
+  var tolak = ptmAksesKelas_(me, kelas); if (tolak) return tolak;
+  var km = ptmKelasMap_(), gm = ptmGuruMap_(), jd = ptmJadwal_(kelas, mapel), pengampu = jd[0] ? String(jd[0].guru_id || '') : '';
+  var info = ptmKelas_(kelas).m[ptmNorm_(mapel)] || { list: [] };
+  var nis = me.siswa ? String(me.ref) : '';
+  var list = info.list.map(function (p) {
+    var o = Object.assign({}, p);
+    o.guru = (gm[o.guru_id] || {}).nama_lengkap || '';
+    o.bolehUbah = ptmBolehUbah_(me, p);
+    if (nis) { var v = p.hadir[nis], s = Array.isArray(v) ? v[0] : v; o.hadir_saya = PTM_KODE[s] ? PTM_KODE[s] : ''; delete o.rekap; }
+    delete o.hadir; delete o.dibuat_oleh;
+    return o;
+  });
+  var ring = ptmRingkasPasangan_(kelas, mapel, nis);
+  return ok_({ pasangan: Object.assign({ kelas_id: kelas, nama_kelas: (km[kelas] || {}).nama_kelas || kelas, mata_pelajaran: info.mapel || (jd[0] && jd[0].mata_pelajaran) || mapel,
+    guru_id: pengampu, guru: (gm[pengampu] || {}).nama_lengkap || '', jadwal: jd.map(function (j) { return { hari: j.hari, jam_mulai: j.jam_mulai, jam_selesai: j.jam_selesai, ruang: j.ruang }; }) }, ring),
+    pertemuan: list, periode: ptmPeriode_(), bolehTambah: !me.siswa, bolehAturTarget: me.sa || (!!me.ref && me.ref === pengampu) });
+}
+
+/** Isian awal absensi pertemuan dari absensi harian tanggal itu */
+function ptmIsiDariHarian_(kelas, tanggal) {
+  var siswa = ptmSiswaKelas_(kelas), harian = {}, adaHarian = false;
+  DB.all('Absensi').forEach(function (a) { if (String(a.tanggal) === String(tanggal) && (a.kelas_id === kelas || !a.kelas_id)) { harian[a.NIS] = a; adaHarian = adaHarian || a.kelas_id === kelas; } });
+  return siswa.map(function (s) {
+    var a = harian[s.NIS], st = a ? (PTM_HADIR[a.status] || 'H') : (adaHarian ? 'A' : 'H');
+    return { NIS: String(s.NIS), nama: s.nama_lengkap, jk: s.jenis_kelamin || '', foto: s.foto_profil_url || '', status: st, keterangan: a ? String(a.keterangan || '') : '', sumber: a ? 'harian' : (adaHarian ? 'tanpa-catatan' : 'bawaan') };
+  });
+}
+/** Pilihan materi (menu Materi) & aktivitas LMS untuk sebuah kelas–mapel */
+function ptmOpsi_(kelas, mapel) {
+  var n = ptmNorm_(mapel), cocok = function (x) { x = ptmNorm_(x); return x && (x === n || x.indexOf(n) > -1 || n.indexOf(x) > -1); };
+  var materi = DB.all('Materi').filter(function (m) { return (m.status || 'Aktif') !== 'Nonaktif' && cocok(m.mata_pelajaran) && (!m.kelas_id || m.kelas_id === kelas); })
+    .map(function (m) { return { materi_id: m.materi_id, judul: m.judul, tipe: m.tipe, tanggal: String(m.tanggal_upload || '').substring(0, 10) }; });
+  var aktivitas = [];
+  if (SCHEMA.Kursus && typeof lmsKursusSemua_ === 'function') {
+    var krs = lmsKursusSemua_().filter(function (k) { return k.status !== 'Arsip' && cocok(k.mapel) && String(k.kelas_ids || '').split(',').map(function (x) { return x.trim(); }).indexOf(kelas) > -1; });
+    krs.forEach(function (k) {
+      var st = typeof lmsStruktur_ === 'function' ? lmsStruktur_(k.kursus_id) : null; if (!st) return;
+      (st.modul || []).forEach(function (m) {
+        if (!LMS_AKTIVITAS[m.tipe] || m.tipe === 'kelasvirtual') return;
+        aktivitas.push({ modul_id: m.modul_id, judul: m.judul, tipe: m.tipe, tipe_label: LMS_AKTIVITAS[m.tipe], kursus_id: k.kursus_id, kursus: k.nama, tutup: m.tutup || '', tampil: m.tampil });
+      });
+    });
+  }
+  return { materi: materi, aktivitas: aktivitas };
+}
+function ptmPresensiGuru_(nuptk, tanggal) {
+  if (!nuptk || !SCHEMA.PresensiGuru) return null;
+  var p = DB.all('PresensiGuru').filter(function (x) { return String(x.NUPTK) === String(nuptk) && String(x.tanggal) === String(tanggal); })[0];
+  return p ? { jam_masuk: String(p.jam_masuk || '').substring(0, 5), jam_pulang: String(p.jam_pulang || '').substring(0, 5), status: p.status || '' } : null;
+}
+function ptmDetail_(p, me) {
+  var gm = ptmGuruMap_(), km = ptmKelasMap_(), mid = ptmJson_(p.materi_ids, []), tg = ptmJson_(p.tugas_lms, []);
+  var materi = mid.length ? DB.all('Materi').filter(function (m) { return mid.indexOf(m.materi_id) > -1; }).map(function (m) { return { materi_id: m.materi_id, judul: m.judul, tipe: m.tipe, mata_pelajaran: m.mata_pelajaran, url_konten: m.url_konten, drive_file_id: m.drive_file_id }; }) : [];
+  var tugas = [];
+  if (tg.length && SCHEMA.KursusModul) {
+    var kmap = {}; if (typeof lmsKursusSemua_ === 'function') lmsKursusSemua_().forEach(function (k) { kmap[k.kursus_id] = k; });
+    DB.all('KursusModul').forEach(function (m) { if (tg.indexOf(m.modul_id) > -1) tugas.push({ modul_id: m.modul_id, judul: m.judul, tipe: m.tipe, tipe_label: (typeof LMS_AKTIVITAS !== 'undefined' && LMS_AKTIVITAS[m.tipe]) || m.tipe, kursus_id: m.kursus_id, kursus: (kmap[m.kursus_id] || {}).nama || '', tutup: m.tutup || '', tampil: m.tampil }); });
+    if (me.siswa) tugas = tugas.filter(function (t) { return t.tampil !== 'TIDAK'; });
+  }
+  var o = { pertemuan_id: p.pertemuan_id, kelas_id: p.kelas_id, nama_kelas: (km[p.kelas_id] || {}).nama_kelas || p.kelas_id, mata_pelajaran: p.mata_pelajaran, guru_id: String(p.guru_id || ''),
+    guru: (gm[p.guru_id] || {}).nama_lengkap || '', tahun_ajaran: p.tahun_ajaran, semester: p.semester, pertemuan_ke: num_(p.pertemuan_ke, 0), tanggal: p.tanggal, jam_ke: p.jam_ke,
+    jam_mulai: p.jam_mulai, jam_selesai: p.jam_selesai, elemen: p.elemen, capaian: p.capaian, tujuan: p.tujuan, materi_pokok: p.materi_pokok, kegiatan: p.kegiatan,
+    materi_ids: mid, tugas_lms: tg, materi: materi, tugas: tugas, catatan_tugas: p.catatan_tugas, status: p.status || 'rencana', guru_hadir: p.guru_hadir, guru_pengganti: p.guru_pengganti,
+    guru_jam: p.guru_jam, rekap: ptmRekap_(p.hadir), diperbarui_pada: p.diperbarui_pada };
+  if (me.siswa) {
+    var h = ptmHadirBaca_(p.hadir)[String(me.ref)];
+    o.hadir_saya = h ? { status: PTM_KODE[h.s], keterangan: h.k } : null;
+    delete o.rekap;
+  } else {
+    o.refleksi = p.refleksi;
+    var hd = ptmHadirBaca_(p.hadir), tersimpan = Object.keys(hd).length > 0;
+    o.hadirTersimpan = tersimpan;
+    o.siswa = tersimpan ? ptmSiswaKelas_(p.kelas_id).map(function (s) { var x = hd[s.NIS]; return { NIS: String(s.NIS), nama: s.nama_lengkap, jk: s.jenis_kelamin || '', foto: s.foto_profil_url || '', status: x ? x.s : 'A', keterangan: x ? x.k : '', sumber: x ? 'tersimpan' : 'baru' }; })
+      : ptmIsiDariHarian_(p.kelas_id, p.tanggal);
+    o.presensi_guru = ptmPresensiGuru_(p.guru_id, p.tanggal);
+    o.bolehUbah = ptmBolehUbah_(me, p);
+    if (o.bolehUbah) o.opsi = ptmOpsi_(p.kelas_id, p.mata_pelajaran);
+  }
+  return o;
+}
+/** ptm.get — detail satu pertemuan. d: { pertemuan_id } */
+function apiPtmGet(ctx, d) {
+  var me = ptmSaya_(ctx), p = DB.find('Pertemuan', 'pertemuan_id', String(d.pertemuan_id || ''));
+  if (!p) return fail_('Pertemuan tidak ditemukan (mungkin sudah dihapus).', { code: 'NOT_FOUND' });
+  var tolak = ptmAksesKelas_(me, p.kelas_id); if (tolak) return tolak;
+  return ok_(ptmDetail_(p, me));
+}
+/** ptm.opsi — bahan formulir pertemuan baru. d: { kelas_id, mata_pelajaran, tanggal? } */
+function apiPtmOpsi(ctx, d) {
+  var me = ptmSaya_(ctx), kelas = String(d.kelas_id || ''), mapel = ptmTeks_(d.mata_pelajaran, 80);
+  if (!kelas || !mapel || !ptmKelasMap_()[kelas]) return fail_('Kelas dan mata pelajaran wajib dipilih.');
+  var tgl = ptmTglOk_(d.tanggal) ? d.tanggal : today_(), per = ptmPeriode_(), n = ptmNorm_(mapel);
+  var mine = ptmSemua_().filter(function (p) { return p.kelas_id === kelas && ptmNorm_(p.mata_pelajaran) === n && String(p.tahun_ajaran) === per.ta && String(p.semester) === per.sem; });
+  var ke = mine.reduce(function (a, p) { return Math.max(a, num_(p.pertemuan_ke, 0)); }, 0) + 1;
+  var akhir = mine.slice().sort(function (a, b) { return num_(b.pertemuan_ke, 0) - num_(a.pertemuan_ke, 0); })[0] || {};
+  var jd = ptmJadwal_(kelas, mapel), hari = HARI[Number(Utilities.formatDate(new Date(tgl + 'T12:00:00'), APP.TZ, 'u')) % 7];
+  var jHari = jd.filter(function (j) { return j.hari === hari; })[0] || jd[0] || {}, pengampu = jd[0] ? String(jd[0].guru_id || '') : me.ref, gm = ptmGuruMap_();
+  return ok_({ kelas_id: kelas, nama_kelas: (ptmKelasMap_()[kelas] || {}).nama_kelas || kelas, mata_pelajaran: (jd[0] && jd[0].mata_pelajaran) || mapel, pertemuan_ke: ke, tanggal: tgl,
+    jam_mulai: jHari.jam_mulai || '', jam_selesai: jHari.jam_selesai || '', elemen: akhir.elemen || '', capaian: akhir.capaian || '',
+    guru_id: pengampu, guru: (gm[pengampu] || {}).nama_lengkap || '', saya_pengampu: !!me.ref && me.ref === pengampu, nama_saya: me.nama,
+    siswa: ptmIsiDariHarian_(kelas, tgl), presensi_guru: ptmPresensiGuru_(pengampu, tgl), opsi: ptmOpsi_(kelas, mapel) });
+}
+
+// ---------------------------------------------------------------------
+// 5. API TULIS
+// ---------------------------------------------------------------------
+function ptmHadirNormal_(kelas, masukan) {
+  var aktif = {}; ptmSiswaKelas_(kelas).forEach(function (s) { aktif[String(s.NIS)] = 1; });
+  var o = {}, items = Array.isArray(masukan) ? masukan : Object.keys(masukan || {}).map(function (nis) { var v = masukan[nis]; return Array.isArray(v) ? { NIS: nis, status: v[0], keterangan: v[1] } : { NIS: nis, status: v }; });
+  items.forEach(function (it) {
+    var nis = String(it.NIS || ''), st = PTM_HADIR[it.status] || (PTM_KODE[it.status] ? it.status : '');
+    if (!aktif[nis] || !st) return;
+    var ket = ptmTeks_(it.keterangan, 120);
+    o[nis] = ket ? [st, ket] : st;
+  });
+  return o;
+}
+/** ptm.save — buat/ubah pertemuan + jurnal + materi/tugas + absensi siswa & guru (1 kali simpan) */
+function apiPtmSave(ctx, d) {
+  var me = ptmSaya_(ctx), semua = ptmSemua_(), id = String(d.pertemuan_id || ''), lama = id ? semua.filter(function (p) { return p.pertemuan_id === id; })[0] : null;
+  if (id && !lama) return fail_('Pertemuan tidak ditemukan (mungkin sudah dihapus).');
+  if (!ptmBolehUbah_(me, lama)) return fail_('Hanya guru pengampu, pembuat jurnal, atau Super Admin yang dapat mengubah pertemuan ini.', { code: 'FORBIDDEN' });
+  var kelas = lama ? lama.kelas_id : String(d.kelas_id || ''), mapel = lama ? lama.mata_pelajaran : ptmTeks_(d.mata_pelajaran, 80);
+  if (!ptmKelasMap_()[kelas]) return fail_('Kelas tidak ditemukan.');
+  if (!mapel) return fail_('Mata pelajaran wajib diisi.');
+  var tgl = String(d.tanggal || (lama && lama.tanggal) || today_());
+  if (!ptmTglOk_(tgl)) return fail_('Tanggal tidak valid.');
+  var ambil = function (k) { return d[k] !== undefined ? d[k] : (lama ? lama[k] : ''); };   // kolom yang tidak dikirim tetap seperti semula
+  var status = (d.status !== undefined ? d.status : (lama && lama.status)) === 'terlaksana' ? 'terlaksana' : 'rencana';
+  var materiPokok = ptmTeks_(ambil('materi_pokok'), 500), kegiatan = ptmTeks_(ambil('kegiatan'));
+  if (status === 'terlaksana') {
+    if (tgl > today_()) return fail_('Pertemuan di tanggal yang akan datang belum bisa ditandai terlaksana.');
+    if (!materiPokok || !kegiatan) return fail_('Lengkapi Materi / Pokok Bahasan dan Ringkasan Kegiatan Pembelajaran sebelum menandai terlaksana.');
+  }
+  var per = lama ? { ta: String(lama.tahun_ajaran), sem: String(lama.semester) } : ptmPeriode_(), n = ptmNorm_(mapel);
+  var sePasang = semua.filter(function (p) { return p.kelas_id === kelas && ptmNorm_(p.mata_pelajaran) === n && String(p.tahun_ajaran) === per.ta && String(p.semester) === per.sem && p.pertemuan_id !== id; });
+  var ke = num_(d.pertemuan_ke, 0) || (lama ? num_(lama.pertemuan_ke, 0) : 0) || sePasang.reduce(function (a, p) { return Math.max(a, num_(p.pertemuan_ke, 0)); }, 0) + 1;
+  if (ke < 1 || ke > 300) return fail_('Nomor pertemuan tidak valid.');
+  if (sePasang.some(function (p) { return num_(p.pertemuan_ke, 0) === ke; })) return fail_('Pertemuan ke-' + ke + ' untuk mapel ini sudah ada. Gunakan nomor lain.');
+  var pengampu = lama ? String(lama.guru_id || '') : (ptmPengampu_(kelas, mapel) || me.ref);
+  var guruHadir = PTM_GURU.indexOf(d.guru_hadir) > -1 ? d.guru_hadir : (lama && lama.guru_hadir) || (me.ref && me.ref === pengampu ? 'Hadir' : 'Digantikan');
+  var pengganti = guruHadir === 'Digantikan' ? (ptmTeks_(ambil('guru_pengganti'), 80) || (me.ref !== pengampu ? me.nama : '')) : '';
+  var hadir = d.hadir !== undefined ? ptmHadirNormal_(kelas, d.hadir) : ptmJson_(lama && lama.hadir, {});
+  if (status === 'terlaksana' && !Object.keys(hadir).length) {                 // belum diisi → ambil dari absensi harian
+    var isi = {}; ptmIsiDariHarian_(kelas, tgl).forEach(function (s) { isi[s.NIS] = s.keterangan ? [s.status, s.keterangan] : s.status; }); hadir = isi;
+  }
+  var jamGuru = (lama && lama.guru_jam) || '';
+  if (!jamGuru && status === 'terlaksana' && (guruHadir === 'Hadir' || guruHadir === 'Digantikan') && tgl === today_()) jamGuru = timeNow_().substring(0, 5);
+  var mids = (Array.isArray(d.materi_ids) ? d.materi_ids : ptmJson_(lama && lama.materi_ids, [])).map(String).filter(function (x) { return /^[A-Z]{2,6}\d{3,}$/.test(x); }).slice(0, 30);
+  var tgs = (Array.isArray(d.tugas_lms) ? d.tugas_lms : ptmJson_(lama && lama.tugas_lms, [])).map(String).filter(function (x) { return /^[A-Z]{2,6}\d{3,}$/.test(x); }).slice(0, 30);
+  var now = nowIso_();
+  var row = { kelas_id: kelas, mata_pelajaran: mapel, guru_id: pengampu, tahun_ajaran: per.ta, semester: per.sem, pertemuan_ke: ke, tanggal: tgl,
+    jam_ke: ptmTeks_(ambil('jam_ke'), 20), jam_mulai: ptmTeks_(ambil('jam_mulai'), 5), jam_selesai: ptmTeks_(ambil('jam_selesai'), 5), elemen: ptmTeks_(ambil('elemen'), 500), capaian: ptmTeks_(ambil('capaian'), 1500),
+    tujuan: ptmTeks_(ambil('tujuan'), 1500), materi_pokok: materiPokok, kegiatan: kegiatan, refleksi: ptmTeks_(ambil('refleksi')), materi_ids: JSON.stringify(mids), tugas_lms: JSON.stringify(tgs),
+    catatan_tugas: ptmTeks_(ambil('catatan_tugas'), 1500), status: status, hadir: JSON.stringify(hadir), guru_hadir: guruHadir, guru_pengganti: pengganti, guru_jam: jamGuru,
+    diperbarui_oleh: me.uid, diperbarui_pada: now };
+  if (lama) { row.pertemuan_id = id; DB.updateBatch('Pertemuan', 'pertemuan_id', [row]); row = Object.assign({}, lama, row); }
+  else { row.pertemuan_id = reserveIds_('Pertemuan', 1)[0]; row.dibuat_oleh = me.uid; row.dibuat_pada = now; DB.appendBatch('Pertemuan', [row]); }
+  ptmSegarkanKelas_(kelas, semua.filter(function (p) { return p.pertemuan_id !== row.pertemuan_id; }).concat([row]));
+  var res = ok_({ pertemuan: ptmDetail_(row, me), ringkas: ptmRingkasPasangan_(kelas, mapel, '') }, status === 'terlaksana' ? 'Jurnal pertemuan ke-' + ke + ' tersimpan & tercatat terlaksana.' : 'Rencana pertemuan ke-' + ke + ' tersimpan.');
+  res.auditDetail = (lama ? 'ubah ' : 'buat ') + row.pertemuan_id + ' ' + mapel + ' ' + kelas + ' ke-' + ke + ' (' + status + ')';
+  return res;
+}
+/** ptm.hapus — d: { pertemuan_id } */
+function apiPtmHapus(ctx, d) {
+  var me = ptmSaya_(ctx), semua = ptmSemua_(), id = String(d.pertemuan_id || ''), p = semua.filter(function (x) { return x.pertemuan_id === id; })[0];
+  if (!p) return fail_('Pertemuan tidak ditemukan.');
+  if (!ptmBolehUbah_(me, p)) return fail_('Hanya guru pengampu, pembuat jurnal, atau Super Admin yang dapat menghapus pertemuan ini.', { code: 'FORBIDDEN' });
+  DB.deleteWhere('Pertemuan', 'pertemuan_id', [id]);
+  ptmSegarkanKelas_(p.kelas_id, semua.filter(function (x) { return x.pertemuan_id !== id; }));
+  var res = ok_({ ringkas: ptmRingkasPasangan_(p.kelas_id, p.mata_pelajaran, '') }, 'Pertemuan ke-' + p.pertemuan_ke + ' dihapus.');
+  res.auditDetail = 'hapus ' + id + ' ' + p.mata_pelajaran + ' ' + p.kelas_id;
+  return res;
+}
+/** ptm.target.save — d: { mata_pelajaran, kelas_id ('' = semua kelas), jumlah (kosong = hapus pengecualian kelas) } */
+function apiPtmTargetSave(ctx, d) {
+  var me = ptmSaya_(ctx), mapel = ptmTeks_(d.mata_pelajaran, 80), kelas = String(d.kelas_id || ''), j = String(d.jumlah === undefined ? '' : d.jumlah).trim();
+  if (!mapel) return fail_('Mata pelajaran wajib dipilih.');
+  if (kelas && !ptmKelasMap_()[kelas]) return fail_('Kelas tidak ditemukan.');
+  if (!me.sa && (!kelas || ptmPengampu_(kelas, mapel) !== me.ref)) return fail_(kelas ? 'Hanya guru pengampu mapel ini atau Super Admin yang dapat mengubah targetnya.' : 'Target untuk semua kelas hanya dapat diatur Super Admin.', { code: 'FORBIDDEN' });
+  var hapus = j === '' || j === '0';
+  if (!hapus && !(Number(j) >= 1 && Number(j) <= 200 && Math.floor(Number(j)) === Number(j))) return fail_('Target pertemuan harus angka 1–200.');
+  if (hapus && !kelas) return fail_('Isi jumlah pertemuan untuk mapel ini.');
+  var n = ptmNorm_(mapel), ada = DB.all('TargetPertemuan').filter(function (t) { return (t.kelas_id || '') === kelas && ptmNorm_(t.mata_pelajaran) === n; })[0];
+  if (hapus) { if (ada) DB.deleteWhere('TargetPertemuan', 'target_id', [ada.target_id]); }
+  else if (ada) DB.updateBatch('TargetPertemuan', 'target_id', [{ target_id: ada.target_id, jumlah: Number(j), diperbarui_oleh: me.uid, diperbarui_pada: nowIso_() }]);
+  else DB.appendBatch('TargetPertemuan', [{ target_id: reserveIds_('TargetPertemuan', 1)[0], mata_pelajaran: mapel, kelas_id: kelas, jumlah: Number(j), diperbarui_oleh: me.uid, diperbarui_pada: nowIso_() }]);
+  bump_('ptmT', true); delete _PTM.tm;
+  var tg = ptmTarget_(kelas, mapel);
+  return ok_({ target: tg.jumlah, sumber: tg.sumber }, hapus ? 'Target khusus kelas dihapus — kembali memakai target mapel (' + tg.jumlah + ' pertemuan).' : 'Target ' + mapel + (kelas ? ' kelas ' + ((ptmKelasMap_()[kelas] || {}).nama_kelas || kelas) : ' (semua kelas)') + ': ' + j + ' pertemuan.');
+}
+
+// ---------------------------------------------------------------------
+// 6. JURNAL MENGAJAR
+// ---------------------------------------------------------------------
+/** ptm.jurnal — d: { guru_id? (Super Admin), kelas_id?, mata_pelajaran?, dari?, sampai?, semua_status? } */
+function apiPtmJurnal(ctx, d) {
+  var me = ptmSaya_(ctx), gid = me.sa && d.guru_id ? String(d.guru_id) : me.ref;
+  if (!gid) return fail_(me.sa ? 'Pilih guru terlebih dulu.' : 'Akun Anda belum terhubung dengan data guru (NUPTK).');
+  var gm = ptmGuruMap_(), km = ptmKelasMap_(), g = gm[gid] || {};
+  var uidGuru = ''; Object.keys(userIdx_()).forEach(function (u) { var x = userIdx_()[u]; if (x.f === gid && x.r !== 'siswa') uidGuru = uidGuru || u; });
+  var per = ptmPeriode_(), dari = ptmTglOk_(d.dari) ? d.dari : String(setting_('SEMESTER_MULAI', '')).substring(0, 10), sampai = ptmTglOk_(d.sampai) ? d.sampai : today_();
+  if (dari && sampai && dari > sampai) return fail_('Tanggal awal harus sebelum tanggal akhir.');
+  var mp = ptmNorm_(d.mata_pelajaran);
+  var rows = ptmSemua_().filter(function (p) {
+    var milik = String(p.guru_id) === gid, pengganti = uidGuru && p.dibuat_oleh === uidGuru && String(p.guru_id) !== gid;
+    if (!milik && !pengganti) return false;
+    if (!d.semua_status && p.status !== 'terlaksana') return false;
+    if (dari && String(p.tanggal) < dari) return false;
+    if (sampai && String(p.tanggal) > sampai) return false;
+    if (d.kelas_id && p.kelas_id !== d.kelas_id) return false;
+    if (mp && ptmNorm_(p.mata_pelajaran) !== mp) return false;
+    return true;
+  }).sort(function (a, b) { return String(a.tanggal).localeCompare(String(b.tanggal)) || String(a.jam_mulai).localeCompare(String(b.jam_mulai)); });
+  var out = rows.map(function (p) {
+    return { pertemuan_id: p.pertemuan_id, tanggal: p.tanggal, hari: HARI[Number(Utilities.formatDate(new Date(String(p.tanggal) + 'T12:00:00'), APP.TZ, 'u')) % 7], jam_ke: p.jam_ke, jam_mulai: p.jam_mulai, jam_selesai: p.jam_selesai,
+      kelas_id: p.kelas_id, nama_kelas: (km[p.kelas_id] || {}).nama_kelas || p.kelas_id, mata_pelajaran: p.mata_pelajaran, pertemuan_ke: num_(p.pertemuan_ke, 0),
+      elemen: p.elemen, capaian: p.capaian, tujuan: p.tujuan, materi_pokok: p.materi_pokok, kegiatan: p.kegiatan, refleksi: p.refleksi, rekap: ptmRekap_(p.hadir),
+      status: p.status, guru_hadir: p.guru_hadir, guru_pengganti: p.guru_pengganti, sebagai_pengganti: String(p.guru_id) !== gid, guru_pengampu: (gm[p.guru_id] || {}).nama_lengkap || '' };
+  });
+  return ok_({ guru: { NUPTK: gid, nama: g.nama_lengkap || me.nama, mata_pelajaran: g.mata_pelajaran || '', jabatan: g.jabatan || '' }, periode: { dari: dari, sampai: sampai, ta: per.ta, sem: per.sem },
+    sekolah: typeof lapSekolah_ === 'function' ? lapSekolah_() : { nama: setting_('NAMA_SEKOLAH', APP.NAME), alamat: setting_('ALAMAT_SEKOLAH', '') }, jurnal: out,
+    guruList: me.sa ? DB.all('Guru').filter(function (x) { return (x.status || 'Aktif') === 'Aktif'; }).map(function (x) { return { NUPTK: String(x.NUPTK), nama: x.nama_lengkap }; }) : null });
+}
+
+// ---------------------------------------------------------------------
+// 7. RUTE, DATA CONTOH, SETUP
+// ---------------------------------------------------------------------
+EXT.routes.push(function (add) {
+  add('ptm.ringkas', apiPtmRingkas, 'any');
+  add('ptm.list', apiPtmList, 'any');
+  add('ptm.get', apiPtmGet, 'any');
+  add('ptm.opsi', apiPtmOpsi, 'guru');
+  add('ptm.jurnal', apiPtmJurnal, 'guru');
+  add('ptm.save', apiPtmSave, 'guru', true, { audit: true });
+  add('ptm.hapus', apiPtmHapus, 'guru', true, { audit: true });
+  add('ptm.target.save', apiPtmTargetSave, 'guru', true, { audit: true });
+});
+ptmKait_('demoClear', function () {
+  ['TargetPertemuan', 'Pertemuan'].forEach(function (n) { var sh = getSheet_(n), last = sh.getLastRow(); if (last > 1) sh.getRange(2, 1, last - 1, sh.getLastColumn()).clearContent(); invalidateRows_(n); });
+  bump_('ptm'); bump_('ptmT');
+});
+/** Perubahan absensi harian tidak mengubah absensi pertemuan yang sudah disimpan (hanya isian awal) */
+ptmKait_('warm', function (step, scope) {
+  if (scope === 'pub') return;
+  step('ptm', function () { ptmTargetMap_(); });
+});
+
+/**
+ * UPDATE KE v3.2 — jalankan SEKALI dari editor (opsional, aman diulang).
+ * Membuat sheet TargetPertemuan, Pertemuan, RatingGuru & baris pengaturan baru bila belum ada.
+ * Tidak mengubah data yang sudah ada.
+ */
+function setupV32() {
+  resetMemo_();
+  if (!prop_('SPREADSHEET_ID')) { Logger.log('⚠️ Belum ada setup. Jalankan setupAppEnvironment() dulu.'); return; }
+  Logger.log('🔧 Update ke v3.2 (Pertemuan & Jurnal, Rating Guru, Captcha, Tema) ...');
+  upgradeSchema(true);
+  if (typeof ratingGaram_ === 'function') ratingGaram_();
+  if (prop_('DEMO_SEEDED') === '1' && typeof seedDemoV32_ === 'function') { seedDemoV32_(); Logger.log('+ data contoh pertemuan & rating (server demo)'); }
+  bump_('ptm'); bump_('ptmT');
+  try { Logger.log('🔥 Warmup: ' + warmCaches_('setup')); } catch (e) { Logger.log('⚠️ Warmup: ' + e.message); }
+  setProp_('V32_SIAP', '3.2.0');
+  Logger.log('✅ Selesai. Lanjutkan: Deploy → Manage deployments → ✏️ Edit → Version: New version → Deploy.');
+}
+if (typeof pasangEkstensi_ === 'function' && typeof SCHEMA !== 'undefined') pasangEkstensi_();
+
+;
+// ==== RatingGuru.gs ====
+/**
+ * =====================================================================
+ *  SIAKAD SISWA v3.2 — RatingGuru.gs : Penilaian (rating) guru oleh siswa — ANONIM
+ *  - Siswa menilai guru yang mengajar di kelasnya (dari Jadwal), 4 aspek bintang 1–5 + komentar
+ *  - Satu penilaian per siswa × guru × mapel × semester (bisa diubah selama periode dibuka)
+ *  - Identitas siswa TIDAK disimpan: kolom `responden` berisi sidik HMAC (garam di Script Properties)
+ *    → guru & Super Admin hanya melihat rata-rata, sebaran, dan komentar tanpa nama.
+ *  - Komentar & rincian per kelas baru tampil bila ada minimal 3 penilai (mencegah tebak-tebakan).
+ *  Sheet baru (aditif): RatingGuru.
+ * =====================================================================
+ */
+var EXT = (typeof EXT !== 'undefined' && EXT) || { schema: {}, seed: [], routes: [], tick: [], reset: [], hooks: {} };
+EXT.schema.RatingGuru = { key: 'rating_id', prefix: 'RTG', cols: ['rating_id', 'guru_id', 'mata_pelajaran', 'kelas_id', 'tahun_ajaran', 'semester', 'responden', 'a1', 'a2', 'a3', 'a4', 'nilai', 'komentar', 'dibuat_pada', 'diperbarui_pada'] };
+EXT.seed.push(['RATING_GURU_AKTIF', 'YA', 'YA/TIDAK — siswa dapat memberi rating guru (anonim) pada semester berjalan']);
+
+var RTG_ASPEK = ['Penguasaan materi', 'Cara menjelaskan', 'Kedisiplinan & ketepatan waktu', 'Sikap & keteladanan'];
+var RTG_MIN_ANONIM = 3;
+
+/** Garam sidik responden — dibuat sekali, hanya di Script Properties (tidak pernah dikirim ke browser) */
+function ratingGaram_() {
+  var g = prop_('RATING_SALT');
+  if (!g) { g = acak_(48); setProp_('RATING_SALT', g); }
+  return g;
+}
+function ratingSidik_(uid, guru, mapel, ta, sem) {
+  return b64u_(Utilities.computeHmacSha256Signature(['rtg', uid, guru, ptmNormR_(mapel), ta, sem].join('|'), ratingGaram_())).substring(0, 24);
+}
+function ptmNormR_(s) { return String(s || '').trim().replace(/\s+/g, ' ').toLowerCase(); }
+function ratingPeriode_() { return { ta: String(setting_('TAHUN_AJARAN', '')), sem: String(setting_('SEMESTER', '')) }; }
+function ratingAktif_() { return String(setting_('RATING_GURU_AKTIF', 'YA')) !== 'TIDAK'; }
+function rataR_(arr) { return arr.length ? Math.round(arr.reduce(function (a, b) { return a + b; }, 0) / arr.length * 100) / 100 : 0; }
+function ratingSiswa_(ctx) {
+  var s = DB.find('Siswa', 'NIS', String(ctx.session.ref || ''));
+  return s && (s.status || 'Aktif') === 'Aktif' ? s : null;
+}
+/** Guru yang mengajar di kelas siswa (unik guru × mapel) */
+function ratingGuruKelas_(kelas) {
+  var gm = {}; DB.all('Guru').forEach(function (g) { gm[String(g.NUPTK)] = g; });
+  var seen = {}, out = [];
+  DB.all('Jadwal').forEach(function (j) {
+    if (j.kelas_id !== kelas || !j.guru_id) return;
+    var k = j.guru_id + '|' + ptmNormR_(j.mata_pelajaran); if (seen[k]) return; seen[k] = 1;
+    var g = gm[String(j.guru_id)] || {};
+    out.push({ guru_id: String(j.guru_id), nama: g.nama_lengkap || String(j.guru_id), foto: g.foto_profil_url || '', mata_pelajaran: j.mata_pelajaran });
+  });
+  return out.sort(function (a, b) { return a.nama.localeCompare(b.nama, 'id') || a.mata_pelajaran.localeCompare(b.mata_pelajaran, 'id'); });
+}
+
+/** rating.saya — daftar guru kelas siswa + penilaian yang sudah diberikan (siswa) */
+function apiRatingSaya(ctx) {
+  var s = ratingSiswa_(ctx); if (!s) return fail_('Data siswa tidak ditemukan.');
+  var per = ratingPeriode_(), punya = {};
+  DB.all('RatingGuru').forEach(function (r) { if (String(r.tahun_ajaran) === per.ta && String(r.semester) === per.sem) punya[r.responden] = r; });
+  var guru = ratingGuruKelas_(s.kelas_id).map(function (g) {
+    var r = punya[ratingSidik_(ctx.session.uid, g.guru_id, g.mata_pelajaran, per.ta, per.sem)];
+    return Object.assign(g, { sudah: !!r, a: r ? [num_(r.a1), num_(r.a2), num_(r.a3), num_(r.a4)] : null, nilai: r ? num_(r.nilai) : null, komentar: r ? String(r.komentar || '') : '' });
+  });
+  return ok_({ aktif: ratingAktif_(), periode: per, aspek: RTG_ASPEK, guru: guru });
+}
+/** rating.kirim — d: { guru_id, mata_pelajaran, a: [4 × 1–5], komentar } (siswa) */
+function apiRatingKirim(ctx, d) {
+  if (!ratingAktif_()) return fail_('Periode penilaian guru sedang ditutup oleh sekolah.');
+  var s = ratingSiswa_(ctx); if (!s) return fail_('Data siswa tidak ditemukan.');
+  var gid = String(d.guru_id || ''), mp = String(d.mata_pelajaran || '').trim();
+  var g = ratingGuruKelas_(s.kelas_id).filter(function (x) { return x.guru_id === gid && ptmNormR_(x.mata_pelajaran) === ptmNormR_(mp); })[0];
+  if (!g) return fail_('Guru ini tidak mengajar di kelas Anda.', { code: 'FORBIDDEN' });
+  var a = (Array.isArray(d.a) ? d.a : []).slice(0, 4).map(Number);
+  if (a.length !== 4 || a.some(function (x) { return !(x >= 1 && x <= 5 && Math.floor(x) === x); })) return fail_('Beri bintang 1–5 untuk keempat aspek.');
+  var kom = String(d.komentar || '').replace(/[\u0000-\u0008\u000B-\u001F]/g, '').trim().substring(0, 300);
+  var per = ratingPeriode_(), sid = ratingSidik_(ctx.session.uid, gid, g.mata_pelajaran, per.ta, per.sem), now = nowIso_();
+  var nilai = Math.round(a.reduce(function (x, y) { return x + y; }, 0) / 4 * 100) / 100;
+  var ada = DB.all('RatingGuru').filter(function (r) { return r.responden === sid && String(r.tahun_ajaran) === per.ta && String(r.semester) === per.sem; })[0];
+  if (kom && (!ada || String(ada.komentar || '') !== kom) && typeof spamCek_ === 'function') { var sp = spamCek_(ctx, kom, 'rating'); if (sp) return fail_(sp); }   // kata terlarang, tautan, batas per menit
+  var row = { guru_id: gid, mata_pelajaran: g.mata_pelajaran, kelas_id: s.kelas_id, tahun_ajaran: per.ta, semester: per.sem, responden: sid, a1: a[0], a2: a[1], a3: a[2], a4: a[3], nilai: nilai, komentar: kom, diperbarui_pada: now };
+  if (ada) { row.rating_id = ada.rating_id; DB.updateBatch('RatingGuru', 'rating_id', [row]); }
+  else { row.rating_id = reserveIds_('RatingGuru', 1)[0]; row.dibuat_pada = now; DB.appendBatch('RatingGuru', [row]); }
+  bump_('rtg', true);
+  return ok_({ guru_id: gid, mata_pelajaran: g.mata_pelajaran, nilai: nilai }, ada ? 'Penilaian diperbarui. Terima kasih!' : 'Terima kasih! Penilaianmu terkirim secara anonim.');
+}
+/** Ringkasan rating seorang guru (anonim) */
+function ratingRingkas_(rows, denganKomentar) {
+  var km = {}; DB.all('Kelas').forEach(function (k) { km[k.kelas_id] = k.nama_kelas; });
+  var n = rows.length, asp = [0, 1, 2, 3].map(function (i) { return rataR_(rows.map(function (r) { return num_(r['a' + (i + 1)]); })); });
+  var sebaran = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+  rows.forEach(function (r) { var b = Math.min(5, Math.max(1, Math.round(num_(r.nilai)))); sebaran[b]++; });
+  var grup = {};
+  rows.forEach(function (r) { var k = r.kelas_id + '|' + r.mata_pelajaran; (grup[k] = grup[k] || { kelas: km[r.kelas_id] || r.kelas_id, mata_pelajaran: r.mata_pelajaran, nilai: [] }).nilai.push(num_(r.nilai)); });
+  var rincian = [], lain = [];
+  Object.keys(grup).forEach(function (k) { var g = grup[k]; if (g.nilai.length >= RTG_MIN_ANONIM) rincian.push({ kelas: g.kelas, mata_pelajaran: g.mata_pelajaran, n: g.nilai.length, rata: rataR_(g.nilai) }); else lain = lain.concat(g.nilai); });
+  if (lain.length) rincian.push({ kelas: 'Kelas lain (digabung agar anonim)', mata_pelajaran: '', n: lain.length, rata: rataR_(lain) });
+  var o = { n: n, rata: rataR_(rows.map(function (r) { return num_(r.nilai); })), aspek: asp, sebaran: sebaran, rincian: rincian.sort(function (a, b) { return b.n - a.n; }) };
+  if (denganKomentar) {
+    o.komentarTampil = n >= RTG_MIN_ANONIM;
+    o.komentar = o.komentarTampil ? rows.filter(function (r) { return String(r.komentar || '').trim(); }).sort(function (a, b) { return String(b.diperbarui_pada).localeCompare(String(a.diperbarui_pada)); })
+      .map(function (r) { return { teks: String(r.komentar), nilai: num_(r.nilai), bulan: String(r.diperbarui_pada || r.dibuat_pada || '').substring(0, 7) }; }).slice(0, 200) : [];
+  }
+  return o;
+}
+/** rating.guru — rating guru yang login (atau guru_id pilihan Super Admin). d: { guru_id?, tahun_ajaran?, semester? } */
+function apiRatingGuru(ctx, d) {
+  var sa = ctx.session.role === 'superadmin', gid = sa && d.guru_id ? String(d.guru_id) : String(ctx.session.ref || '');
+  if (!gid) return fail_(sa ? 'Pilih guru terlebih dulu.' : 'Akun Anda belum terhubung dengan data guru (NUPTK).');
+  var per = ratingPeriode_(), ta = String(d.tahun_ajaran || per.ta), sem = String(d.semester || per.sem);
+  var semua = DB.all('RatingGuru').filter(function (r) { return String(r.guru_id) === gid; });
+  var rows = semua.filter(function (r) { return String(r.tahun_ajaran) === ta && String(r.semester) === sem; });
+  var periodeAda = {}; semua.forEach(function (r) { periodeAda[r.tahun_ajaran + '|' + r.semester] = 1; }); periodeAda[per.ta + '|' + per.sem] = 1;
+  var g = DB.find('Guru', 'NUPTK', gid) || {};
+  return ok_(Object.assign({ guru: { NUPTK: gid, nama: g.nama_lengkap || '', mata_pelajaran: g.mata_pelajaran || '', foto: g.foto_profil_url || '' }, periode: { ta: ta, sem: sem },
+    periodeList: Object.keys(periodeAda).sort().reverse().map(function (k) { var x = k.split('|'); return { ta: x[0], sem: x[1] }; }), aspekLabel: RTG_ASPEK, aktif: ratingAktif_(), minAnonim: RTG_MIN_ANONIM }, ratingRingkas_(rows, true)));
+}
+/** rating.rekap — semua guru (Super Admin). d: { tahun_ajaran?, semester? } */
+function apiRatingRekap(ctx, d) {
+  var per = ratingPeriode_(), ta = String(d.tahun_ajaran || per.ta), sem = String(d.semester || per.sem);
+  var by = {}; DB.all('RatingGuru').forEach(function (r) { if (String(r.tahun_ajaran) === ta && String(r.semester) === sem) (by[String(r.guru_id)] = by[String(r.guru_id)] || []).push(r); });
+  var mapelGuru = {}; DB.all('Jadwal').forEach(function (j) { var k = String(j.guru_id); (mapelGuru[k] = mapelGuru[k] || {})[j.mata_pelajaran] = 1; });
+  var guru = DB.all('Guru').filter(function (g) { return (g.status || 'Aktif') === 'Aktif'; }).map(function (g) {
+    var rows = by[String(g.NUPTK)] || [], r = ratingRingkas_(rows, false);
+    return { guru_id: String(g.NUPTK), nama: g.nama_lengkap, foto: g.foto_profil_url || '', mapel: Object.keys(mapelGuru[String(g.NUPTK)] || {}).join(', ') || g.mata_pelajaran || '', n: r.n, rata: r.rata, aspek: r.aspek };
+  }).sort(function (a, b) { return (b.n ? 1 : 0) - (a.n ? 1 : 0) || b.rata - a.rata || b.n - a.n || a.nama.localeCompare(b.nama, 'id'); });
+  var total = Object.keys(by).reduce(function (a, k) { return a + by[k].length; }, 0), semuaNilai = [];
+  Object.keys(by).forEach(function (k) { by[k].forEach(function (r) { semuaNilai.push(num_(r.nilai)); }); });
+  return ok_({ periode: { ta: ta, sem: sem }, aktif: ratingAktif_(), aspekLabel: RTG_ASPEK, total: total, rata: rataR_(semuaNilai), dinilai: Object.keys(by).length, guru: guru });
+}
+/** rating.atur — buka/tutup penilaian (Super Admin). d: { aktif: 'YA'|'TIDAK' } */
+function apiRatingAtur(ctx, d) {
+  var v = d.aktif === 'TIDAK' ? 'TIDAK' : 'YA';
+  saveSettings_({ RATING_GURU_AKTIF: v });
+  return ok_({ aktif: v === 'YA' }, v === 'YA' ? 'Penilaian guru oleh siswa DIBUKA.' : 'Penilaian guru oleh siswa DITUTUP.');
+}
+
+EXT.routes.push(function (add) {
+  add('rating.saya', apiRatingSaya, 'siswa');
+  add('rating.kirim', apiRatingKirim, 'siswa', true);
+  add('rating.guru', apiRatingGuru, 'guru');
+  add('rating.rekap', apiRatingRekap, 'sa');
+  add('rating.atur', apiRatingAtur, 'sa', true, { audit: true });
+});
+(EXT.hooks.cfg = EXT.hooks.cfg || []).push(function (o, c) { o.RATING_GURU_AKTIF = c.RATING_GURU_AKTIF || 'YA'; });
+(EXT.hooks.demoClear = EXT.hooks.demoClear || []).push(function () {
+  var sh = getSheet_('RatingGuru'), last = sh.getLastRow(); if (last > 1) sh.getRange(2, 1, last - 1, sh.getLastColumn()).clearContent(); invalidateRows_('RatingGuru');
+});
+if (typeof pasangEkstensi_ === 'function' && typeof SCHEMA !== 'undefined') pasangEkstensi_();
+
+;
+// ==== Captcha.gs ====
+/**
+ * =====================================================================
+ *  SIAKAD SISWA v3.2 — Captcha.gs : Captcha penjumlahan di halaman login
+ *  - captcha.baru (publik) memberi soal "7 + 5 = ?" + token bertanda tangan HMAC (berlaku 5 menit)
+ *  - Server memeriksa jawaban SEBELUM sandi dicek (gerbang), tanpa menyimpan apa pun di sheet;
+ *    token sekali pakai (dicatat di CacheService) → tidak bisa dipakai ulang oleh bot.
+ *  - Bisa dimatikan Super Admin (Keamanan Lanjutan) → pengaturan CAPTCHA_LOGIN = TIDAK.
+ *  Rahasia penanda tangan = SESSION_SECRET yang sudah ada di Script Properties (dipisah domain 'cap|').
+ * =====================================================================
+ */
+var EXT = (typeof EXT !== 'undefined' && EXT) || { schema: {}, seed: [], routes: [], tick: [], reset: [], hooks: {} };
+EXT.seed.push(['CAPTCHA_LOGIN', 'YA', 'YA/TIDAK — wajib menjawab captcha penjumlahan saat login dengan sandi']);
+var CAPTCHA_MENIT = 5;
+
+function captchaAktif_() { return String(setting_('CAPTCHA_LOGIN', 'YA')) !== 'TIDAK'; }
+/** captcha.baru — soal baru (publik). Jawaban tidak pernah dikirim; hanya tanda tangannya. */
+function apiCaptchaBaru() {
+  if (!captchaAktif_()) return ok_({ aktif: false });
+  var kurang = Math.random() < 0.3, a, b, jawab, soal;
+  if (kurang) { a = 10 + Math.floor(Math.random() * 11); b = 1 + Math.floor(Math.random() * 9); jawab = a - b; soal = a + ' − ' + b; }
+  else { a = 2 + Math.floor(Math.random() * 19); b = 1 + Math.floor(Math.random() * 9); jawab = a + b; soal = a + ' + ' + b; }
+  var exp = Date.now() + CAPTCHA_MENIT * 60000, nonce = acak_(12);
+  var muat = b64u_(JSON.stringify({ e: exp, n: nonce }));
+  return ok_({ aktif: true, soal: soal + ' = ?', token: muat + '.' + sign_('cap|' + muat + '|' + jawab), exp: exp });
+}
+/** Periksa captcha: null = lolos, objek gagal = ditolak */
+function captchaCek_(cap) {
+  if (!cap || !cap.token || cap.jawab === undefined || cap.jawab === null || String(cap.jawab).trim() === '')
+    return fail_('Jawab soal penjumlahan (captcha) terlebih dulu. Bila kotak captcha tidak tampil, muat ulang halaman dengan Ctrl+Shift+R.', { code: 'CAPTCHA' });
+  var bagian = String(cap.token).split('.');
+  if (bagian.length !== 2) return fail_('Captcha tidak valid. Muat soal baru.', { code: 'CAPTCHA' });
+  var p; try { var b = bagian[0]; while (b.length % 4) b += '='; p = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(b)).getDataAsString()); } catch (e) { return fail_('Captcha tidak valid. Muat soal baru.', { code: 'CAPTCHA' }); }
+  if (!p || !p.e || p.e < Date.now()) return fail_('Soal captcha kedaluwarsa. Jawab soal yang baru.', { code: 'CAPTCHA' });
+  var c = CacheService.getScriptCache(), k = 'capu_' + String(p.n || '').replace(/[^A-Za-z0-9]/g, '');
+  if (c.get(k)) return fail_('Soal captcha sudah dipakai. Jawab soal yang baru.', { code: 'CAPTCHA' });
+  c.put(k, '1', CAPTCHA_MENIT * 60 + 60);                          // sekali pakai, benar maupun salah
+  var jawab = String(cap.jawab).trim().replace(/[^\d-]/g, '');
+  if (!jawab || !samaAman_(sign_('cap|' + bagian[0] + '|' + Number(jawab)), bagian[1])) return fail_('Jawaban captcha salah. Coba soal yang baru.', { code: 'CAPTCHA' });
+  return null;
+}
+(EXT.hooks.gerbang = EXT.hooks.gerbang || []).push(function (ctx, r, body) {
+  if (r.name !== 'login' || !captchaAktif_()) return null;
+  return captchaCek_((body.data || {}).captcha);
+});
+/** captcha.atur — Super Admin: d: { aktif: 'YA'|'TIDAK' } */
+function apiCaptchaAtur(ctx, d) {
+  var v = d.aktif === 'TIDAK' ? 'TIDAK' : 'YA';
+  saveSettings_({ CAPTCHA_LOGIN: v });
+  return ok_({ aktif: v === 'YA' }, v === 'YA' ? 'Captcha login diaktifkan.' : 'Captcha login dimatikan.');
+}
+EXT.routes.push(function (add) {
+  add('captcha.baru', apiCaptchaBaru, 'public');
+  add('captcha.atur', apiCaptchaAtur, 'sa', true, { audit: true });
+});
+(EXT.hooks.cfg = EXT.hooks.cfg || []).push(function (o, c) { o.CAPTCHA_LOGIN = c.CAPTCHA_LOGIN || 'YA'; });
+if (typeof pasangEkstensi_ === 'function' && typeof SCHEMA !== 'undefined') pasangEkstensi_();
+
+;
 // ==== LmsDemo.gs ====
 /**
  * =====================================================================
@@ -7995,6 +8644,109 @@ function seedDemoV3_(rnd) {
   DB.appendBatch('LogAktivitas', log);
   setProp_('V3_SIAP', APP.VERSION);
   bump_('lms'); bump_('lmsr');
+}
+
+// =====================================================================
+// v3.2 — data contoh Mapel & Pertemuan (jurnal, absensi pertemuan) + Rating Guru
+// =====================================================================
+(EXT.hooks.seedDemo = EXT.hooks.seedDemo || []).push(function (rnd) { if (SCHEMA.Pertemuan) seedDemoV32_(rnd); });
+function seedDemoV32_(rnd) {
+  rnd = rnd || prng_(20261016);
+  if (!SCHEMA.Pertemuan || DB.all('Pertemuan').length) return;
+  var per = ptmPeriode_(), now = nowIso_(), hari = today_(), mulai = String(setting_('SEMESTER_MULAI', '')).substring(0, 10) || hari.substring(0, 8) + '01';
+  var by = {}; DB.all('Users').forEach(function (u) { by[lower_(u.email)] = u; });
+  var G = by['guru@sekolah.sch.id'], AH = by['siswa@sekolah.sch.id'];
+  var absTgl = {}; DB.all('Absensi').forEach(function (a) { absTgl[a.kelas_id + '|' + a.tanggal] = 1; });
+  var gm = {}; DB.all('Guru').forEach(function (g) { gm[String(g.NUPTK)] = g; });
+  var uidGuru = {}; DB.all('Users').forEach(function (u) { if (u.role !== 'siswa' && u.ref_id) uidGuru[String(u.ref_id)] = u.user_id; });
+  // materi contoh Biologi untuk XII IPA 1 (menu Materi) — hanya di data contoh
+  var mtrBio = '';
+  if (!DB.all('Materi').some(function (m) { return m.mata_pelajaran === 'Biologi' && m.kelas_id === 'KLS000001'; })) {
+    mtrBio = reserveIds_('Materi', 1)[0];
+    DB.appendBatch('Materi', [{ materi_id: mtrBio, judul: 'Sistem Peredaran Darah Manusia — Ringkasan Bab 3', deskripsi: 'Komponen darah, golongan darah, jantung & pembuluh darah, serta kelainan sistem peredaran darah.', mata_pelajaran: 'Biologi', kelas_id: 'KLS000001', guru_id: '19780215', tipe: 'dokumen', url_konten: 'demo/peredaran-darah.pdf', drive_file_id: '', ukuran: 1835008, durasi: '', tanggal_upload: mulai + 'T08:00:00+07:00', status: 'Aktif' }]);
+  }
+  function tanggalPasangan(kelas, mapel) {
+    var hariJ = ptmJadwal_(kelas, mapel).map(function (j) { return j.hari; }), out = [];
+    for (var t = new Date(mulai + 'T12:00:00'); Utilities.formatDate(t, APP.TZ, 'yyyy-MM-dd') < hari; t = new Date(t.getTime() + 864e5)) {
+      var tg = Utilities.formatDate(t, APP.TZ, 'yyyy-MM-dd'), h = HARI[Number(Utilities.formatDate(t, APP.TZ, 'u')) % 7];
+      if (hariJ.indexOf(h) > -1 && absTgl[kelas + '|' + tg]) out.push(tg);
+    }
+    return out;
+  }
+  function tanggalDepan(kelas, mapel, n) {
+    var hariJ = ptmJadwal_(kelas, mapel).map(function (j) { return j.hari; }), out = [];
+    for (var t = new Date(Date.now() + 864e5); out.length < n && out.length < 40; t = new Date(t.getTime() + 864e5)) { var h = HARI[Number(Utilities.formatDate(t, APP.TZ, 'u')) % 7]; if (hariJ.indexOf(h) > -1) out.push(Utilities.formatDate(t, APP.TZ, 'yyyy-MM-dd')); }
+    return out;
+  }
+  var BIO_CP = 'Peserta didik memahami struktur dan fungsi sistem organ pada manusia serta kelainan dan gangguan yang dapat terjadi, lalu menerapkannya untuk pola hidup sehat.';
+  var MAT_CP = 'Peserta didik memahami konsep limit fungsi aljabar dan menerapkannya untuk menyelesaikan masalah kontekstual.';
+  var RENC = {
+    'Biologi': { elemen: 'Pemahaman Biologi', cp: BIO_CP, topik: [
+      ['Komponen darah dan fungsinya', 'Menjelaskan komponen darah (plasma, eritrosit, leukosit, trombosit) beserta fungsinya.', 'Apersepsi tentang luka berdarah; pengamatan preparat apusan darah dengan mikroskop berkelompok (4 orang); diskusi fungsi tiap komponen; kuis lisan 5 soal.', 'Sebagian siswa sulit membedakan jenis leukosit — pertemuan berikut memakai gambar pembanding.'],
+      ['Golongan darah sistem ABO & Rhesus', 'Menentukan golongan darah dan menjelaskan prinsip transfusi darah.', 'Simulasi uji golongan darah dengan larutan tiruan; tabel kecocokan donor–resipien; studi kasus transfusi.', 'Antusias tinggi. Waktu simulasi kurang 10 menit, pembahasan kasus dilanjutkan sebagai PR.'],
+      ['Struktur jantung dan pembuluh darah', 'Mengidentifikasi bagian-bagian jantung dan membedakan arteri, vena, kapiler.', 'Pengamatan model jantung; video animasi aliran darah; lembar kerja melabel bagian jantung; presentasi singkat per kelompok.', '2 siswa izin mengikuti lomba. Model jantung milik lab perlu diperbaiki.'],
+      ['Mekanisme peredaran darah besar dan kecil', 'Menjelaskan alur peredaran darah sistemik dan pulmonal.', 'Permainan peran alur darah memakai kartu organ; diagram alir di papan; tanya jawab.', 'Metode permainan peran efektif — hampir semua siswa mampu menjelaskan alur darah.'],
+      ['Mekanisme pembekuan darah', 'Menguraikan tahapan pembekuan darah dan faktor yang berperan.', 'Diskusi kelompok dengan bagan reaksi berantai; tayangan video luka sembuh; kuis Kahoot.', 'Kegiatan terpotong 15 menit karena gladi upacara; materi pembekuan dilanjutkan singkat minggu depan.'],
+      ['Kelainan dan penyakit sistem peredaran darah', 'Menganalisis penyebab hipertensi, anemia, varises, serta pencegahannya.', 'Mengukur tekanan darah teman dengan tensimeter digital; analisis data kelas; diskusi gaya hidup sehat.', 'Data tekanan darah dipakai untuk tugas poster. Ingatkan siswa yang belum mengumpulkan data.'],
+      ['Kuis 1 & pembahasan', 'Mengevaluasi pemahaman materi sistem peredaran darah.', 'Kuis 1 di LMS (20 menit); pembahasan soal yang paling banyak salah; penjelasan tugas poster.', 'Rata-rata kuis 78. Remedial untuk 4 siswa di bawah KKM melalui LMS.'],
+      ['Tugas proyek: poster pencegahan hipertensi', 'Merancang poster kampanye pencegahan hipertensi berbasis data.', 'Kerja kelompok merancang poster; konsultasi dengan guru per kelompok.', ''],
+      ['Presentasi poster & refleksi bab', 'Mempresentasikan poster dan merefleksikan pembelajaran bab 3.', 'Galeri poster; penilaian sejawat; refleksi tertulis.', '']] },
+    'Matematika Wajib': { elemen: 'Kalkulus', cp: MAT_CP, topik: ['Pengertian limit secara intuitif', 'Limit fungsi di satu titik', 'Sifat-sifat limit fungsi aljabar', 'Limit bentuk tak tentu 0/0 (pemfaktoran)', 'Limit dengan perkalian sekawan', 'Limit tak hingga', 'Latihan soal campuran', 'Penerapan limit dalam masalah nyata', 'Ulangan harian 1', 'Remedial & pengayaan'].map(function (t) { return [t, 'Siswa mampu memahami dan menyelesaikan soal ' + t.toLowerCase() + '.', 'Penjelasan konsep dengan contoh; latihan terbimbing berpasangan; latihan mandiri dan pembahasan.', '']; }) },
+    'Fisika': { elemen: 'Pemahaman Fisika', cp: 'Peserta didik memahami gejala kuantum dan penerapannya dalam teknologi.', topik: ['Radiasi benda hitam', 'Efek fotolistrik', 'Efek Compton', 'Dualisme gelombang–partikel', 'Praktikum virtual efek fotolistrik'].map(function (t) { return [t, 'Menjelaskan konsep ' + t.toLowerCase() + '.', 'Demonstrasi/simulasi PhET; diskusi kelompok; latihan soal.', '']; }) },
+    'Kimia': { elemen: 'Pemahaman Kimia', cp: 'Peserta didik memahami struktur, tata nama, sifat, dan kegunaan senyawa benzena.', topik: ['Struktur benzena & resonansi', 'Tata nama benzena monosubstitusi', 'Tata nama benzena disubstitusi (o, m, p)', 'Sifat fisik & kimia benzena', 'Reaksi substitusi benzena', 'Kegunaan dan dampak senyawa benzena'].map(function (t) { return [t, 'Menjelaskan ' + t.toLowerCase() + '.', 'Model molekul; diskusi; latihan soal tata nama.', '']; }) },
+    'Bahasa Indonesia': { elemen: 'Membaca & Menulis', cp: 'Peserta didik mampu menganalisis dan menulis teks prosedur kompleks serta teks eksplanasi.', topik: ['Struktur teks eksplanasi', 'Kaidah kebahasaan teks eksplanasi', 'Menganalisis teks eksplanasi', 'Menulis teks eksplanasi', 'Menyunting teks eksplanasi', 'Presentasi teks eksplanasi', 'Ulangan harian'].map(function (t) { return [t, 'Siswa mampu ' + t.toLowerCase() + '.', 'Membaca contoh teks; diskusi; praktik menulis.', '']; }) },
+    'Bahasa Inggris': { elemen: 'Reading & Writing', cp: 'Peserta didik mampu memahami dan menulis teks eksposisi analitis.', topik: ['Analytical exposition: social function', 'Generic structure & language features', 'Reading comprehension practice', 'Writing an analytical exposition'].map(function (t) { return [t, 'Students are able to understand ' + t.toLowerCase() + '.', 'Reading model text; group discussion; individual writing.', '']; }) },
+    'Matematika Peminatan': { elemen: 'Kalkulus', cp: 'Peserta didik memahami turunan fungsi trigonometri dan penerapannya.', topik: ['Turunan fungsi sinus & kosinus', 'Turunan fungsi tangen dll.', 'Aturan rantai fungsi trigonometri', 'Turunan kedua', 'Titik stasioner fungsi trigonometri', 'Latihan soal'].map(function (t) { return [t, 'Menentukan ' + t.toLowerCase() + '.', 'Penjelasan; latihan terbimbing; diskusi.', '']; }) },
+    'Pendidikan Agama & Budi Pekerti': { elemen: 'Akhlak', cp: 'Peserta didik memahami dan membiasakan akhlak terpuji dalam kehidupan sehari-hari.', topik: ['Kejujuran dan amanah', 'Toleransi dan kerukunan', 'Etos kerja'].map(function (t) { return [t, 'Memahami nilai ' + t.toLowerCase() + '.', 'Kajian dalil; diskusi kasus; refleksi diri.', '']; }) },
+    'Sejarah Indonesia': { elemen: 'Pemahaman Sejarah', cp: 'Peserta didik memahami perjuangan mempertahankan kemerdekaan Indonesia.', topik: ['Agresi Militer Belanda I', 'Perundingan Renville'].map(function (t) { return [t, 'Menjelaskan peristiwa ' + t + '.', 'Ceramah interaktif; analisis sumber; diskusi.', '']; }) }
+  };
+  var JML = { 'KLS000001|Biologi': [7, 2], 'KLS000001|Matematika Wajib': [10, 0], 'KLS000001|Fisika': [5, 0], 'KLS000001|Kimia': [6, 0], 'KLS000001|Bahasa Indonesia': [7, 0],
+    'KLS000001|Bahasa Inggris': [4, 0], 'KLS000001|Matematika Peminatan': [6, 0], 'KLS000001|Pendidikan Agama & Budi Pekerti': [3, 0], 'KLS000001|Sejarah Indonesia': [2, 0], 'KLS000002|Biologi': [5, 1] };
+  var opsiBio = ptmOpsi_('KLS000001', 'Biologi'), tugasBio = opsiBio.aktivitas.filter(function (a) { return a.tipe === 'kuis' || a.tipe === 'tugas'; }).map(function (a) { return a.modul_id; });
+  var materiBio = opsiBio.materi.map(function (m) { return m.materi_id; });
+  var rows = [], ids = reserveIds_('Pertemuan', 60), ii = 0;
+  Object.keys(JML).forEach(function (key) {
+    var kelas = key.split('|')[0], mapel = key.split('|')[1], r = RENC[mapel]; if (!r) return;
+    var jd = ptmJadwal_(kelas, mapel); if (!jd.length) return;
+    var guru = String(jd[0].guru_id), lalu = tanggalPasangan(kelas, mapel), n = Math.min(JML[key][0], lalu.length), pakai = lalu.slice(lalu.length - n), depan = tanggalDepan(kelas, mapel, JML[key][1]);
+    pakai.concat(depan).forEach(function (tg, i) {
+      var tp = r.topik[i % r.topik.length], selesai = i < pakai.length, h = HARI[Number(Utilities.formatDate(new Date(tg + 'T12:00:00'), APP.TZ, 'u')) % 7];
+      var j = jd.filter(function (x) { return x.hari === h; })[0] || jd[0];
+      var hadir = {}; if (selesai) ptmIsiDariHarian_(kelas, tg).forEach(function (s) { hadir[s.NIS] = s.keterangan ? [s.status, s.keterangan] : s.status; });
+      var ganti = selesai && mapel === 'Biologi' && kelas === 'KLS000001' && i === 2;
+      var bio = mapel === 'Biologi' && kelas === 'KLS000001';
+      rows.push({ pertemuan_id: ids[ii++], kelas_id: kelas, mata_pelajaran: mapel, guru_id: guru, tahun_ajaran: per.ta, semester: per.sem, pertemuan_ke: i + 1, tanggal: tg,
+        jam_ke: { '07:15': '1–2', '09:00': '3–4', '10:45': '5–6', '13:00': '7–8' }[j.jam_mulai] || '', jam_mulai: j.jam_mulai, jam_selesai: j.jam_selesai, elemen: r.elemen, capaian: r.cp,
+        tujuan: tp[1], materi_pokok: tp[0], kegiatan: selesai ? tp[2] : '', refleksi: selesai ? tp[3] : '',
+        materi_ids: JSON.stringify(bio ? materiBio.slice(0, i < 3 ? 1 : 2) : []), tugas_lms: JSON.stringify(bio && i >= 5 ? tugasBio.slice(i === 5 ? 1 : 0, i === 5 ? 2 : 1) : []),
+        catatan_tugas: bio && i === 1 ? 'Kerjakan studi kasus transfusi darah di buku paket hlm. 87 nomor 1–5, dikumpulkan pertemuan berikutnya.' : (bio && i === 7 ? 'Bawa data tekanan darah keluarga untuk bahan poster.' : ''),
+        status: selesai ? 'terlaksana' : 'rencana', hadir: selesai ? JSON.stringify(hadir) : '{}', guru_hadir: ganti ? 'Digantikan' : 'Hadir', guru_pengganti: ganti ? ((gm['19840215'] || {}).nama_lengkap || 'Guru piket') : '',
+        guru_jam: selesai ? String(j.jam_mulai || '').substring(0, 5) : '', dibuat_oleh: ganti ? (uidGuru['19840215'] || '') : (uidGuru[guru] || (G && G.user_id) || ''), dibuat_pada: tg + 'T' + (j.jam_selesai || '15:00') + ':00+07:00',
+        diperbarui_oleh: uidGuru[guru] || '', diperbarui_pada: now });
+    });
+  });
+  DB.appendBatch('Pertemuan', rows);
+  DB.appendBatch('TargetPertemuan', reserveIds_('TargetPertemuan', 2).map(function (id, i) { return [{ target_id: id, mata_pelajaran: 'Biologi', kelas_id: '', jumlah: 18 }, { target_id: id, mata_pelajaran: 'Matematika Wajib', kelas_id: 'KLS000001', jumlah: 20 }][i]; })
+    .map(function (x) { return Object.assign(x, { diperbarui_oleh: (by['admin@sekolah.sch.id'] || {}).user_id || '', diperbarui_pada: now }); }));
+  bump_('ptm'); bump_('ptmT');
+  // ---- rating guru (anonim) oleh siswa XII IPA 1
+  if (!SCHEMA.RatingGuru || DB.all('RatingGuru').length) return;
+  var siswaU = DB.all('Users').filter(function (u) { return u.role === 'siswa' && u.kelas_id === 'KLS000001' && u.status_aktif === 'YA'; });
+  var KOM = ['Penjelasannya runtut dan mudah dipahami.', 'Praktikumnya seru, semoga lebih sering.', 'Terima kasih Pak, sabar menjawab pertanyaan.', 'Kadang terlalu cepat menjelaskan, mohon diulang bagian yang sulit.', 'Tugasnya bermanfaat, tapi tenggatnya agak mepet.', '', '', 'Contoh soalnya relevan dengan kehidupan sehari-hari.', 'Selalu tepat waktu masuk kelas.', ''];
+  var RT = [['19780215', 'Biologi', 14, false], ['19680512', 'Matematika Wajib', 9, true], ['19840215', 'Fisika', 5, false], ['19770821', 'Kimia', 2, false]];
+  var rRows = [], rid = reserveIds_('RatingGuru', 40), ri = 0;
+  RT.forEach(function (x) {
+    var daftar = siswaU.filter(function (u) { return x[3] ? true : u.user_id !== (AH && AH.user_id); }).slice(0, x[2]);
+    if (x[3] && AH && daftar.map(function (u) { return u.user_id; }).indexOf(AH.user_id) === -1) daftar[0] = AH;
+    daftar.forEach(function (u, i) {
+      var basis = x[0] === '19780215' ? 4.3 : x[0] === '19680512' ? 3.9 : 4.0;
+      var a = [0, 1, 2, 3].map(function (k) { return Math.max(2, Math.min(5, Math.round(basis + (rnd() - 0.45) * 1.8 + (k === 2 ? 0.3 : 0)))); });
+      var tgl = Utilities.formatDate(new Date(Date.now() - (i + 1) * 2 * 864e5), APP.TZ, "yyyy-MM-dd'T'HH:mm:ssXXX");
+      rRows.push({ rating_id: rid[ri++], guru_id: x[0], mata_pelajaran: x[1], kelas_id: 'KLS000001', tahun_ajaran: per.ta, semester: per.sem, responden: ratingSidik_(u.user_id, x[0], x[1], per.ta, per.sem),
+        a1: a[0], a2: a[1], a3: a[2], a4: a[3], nilai: Math.round((a[0] + a[1] + a[2] + a[3]) / 4 * 100) / 100, komentar: KOM[(i + x[2]) % KOM.length], dibuat_pada: tgl, diperbarui_pada: tgl });
+    });
+  });
+  DB.appendBatch('RatingGuru', rRows);
 }
 
 if (typeof pasangEkstensi_ === 'function' && typeof SCHEMA !== 'undefined') pasangEkstensi_();

@@ -306,14 +306,14 @@ registerPage('guru', 'pengaturan', {
   init: function (el) {
     var self = this;
     var sa = isSA();
-    if (!sa && ['kelas', 'mapel', 'pengumuman'].indexOf(this.st.tab) === -1) this.st.tab = 'kelas';
+    if (!sa && ['kelas', 'mapel', 'pengumuman', 'tampilan'].indexOf(this.st.tab) === -1) this.st.tab = 'kelas';
     el.innerHTML = pageHead((sa ? 'Super Admin' : 'Panel Guru') + ' <span>// Pengaturan Sistem</span>', 'Pengaturan', sa ? 'Identitas sekolah, parameter akademik, data guru, kelas, mata pelajaran, pengumuman, dan log aktivitas.' : 'Kelas, mata pelajaran, dan pengumuman sekolah. Pengaturan sistem lainnya dikelola Super Admin.') +
-      '<div class="tabs" id="pTabs">' + (sa ? '<button data-t="sekolah">' + ic('school') + 'Sekolah</button><button data-t="akademik">' + ic('graduation-cap') + 'Akademik</button><button data-t="guru">' + ic('contact') + 'Guru</button>' : '') + '<button data-t="kelas">' + ic('door-open') + 'Kelas</button><button data-t="mapel">' + ic('book-marked') + 'Mata Pelajaran</button><button data-t="pengumuman">' + ic('megaphone') + 'Pengumuman</button>' + (sa ? '<button data-t="log">' + ic('scroll-text') + 'Log Aktivitas</button><button data-t="sistem">' + ic('server-cog') + 'Sistem</button>' : '') + '</div><div id="pBody" class="mt16"></div>';
+      '<div class="tabs" id="pTabs">' + (sa ? '<button data-t="sekolah">' + ic('school') + 'Sekolah</button><button data-t="akademik">' + ic('graduation-cap') + 'Akademik</button><button data-t="guru">' + ic('contact') + 'Guru</button>' : '') + '<button data-t="kelas">' + ic('door-open') + 'Kelas</button><button data-t="mapel">' + ic('book-marked') + 'Mata Pelajaran</button><button data-t="pengumuman">' + ic('megaphone') + 'Pengumuman</button><button data-t="tampilan">' + ic('palette') + 'Tampilan</button>' + (sa ? '<button data-t="log">' + ic('scroll-text') + 'Log Aktivitas</button><button data-t="sistem">' + ic('server-cog') + 'Sistem</button>' : '') + '</div><div id="pBody" class="mt16"></div>';
     $$('#pTabs button', el).forEach(function (b) { b.onclick = function () { self.st.tab = b.dataset.t; self.render(el); }; });
   },
   render: function (el, param) {
     var st = this.st; if (param) { st.tab = param; }
-    if (!isSA() && ['kelas', 'mapel', 'pengumuman'].indexOf(st.tab) === -1) st.tab = 'kelas';
+    if (!isSA() && ['kelas', 'mapel', 'pengumuman', 'tampilan'].indexOf(st.tab) === -1) st.tab = 'kelas';
     $$('#pTabs button', el).forEach(function (b) { b.classList.toggle('on', b.dataset.t === st.tab); });
     var box = $('#pBody', el), fn = this['t_' + st.tab]; fn.call(this, box, el);
   },

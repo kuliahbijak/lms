@@ -134,7 +134,7 @@ function jadwalForm(j) {
 // =====================================================================
 var Scanner = {
   stream: null, reader: null, loop: null, last: {}, video: null,
-  start: async function (video, onCode) {
+  start: async function (video, onCode, kamera) {
     this.stop(); this.video = video;
     var self = this, emit = function (code) { code = String(code || '').trim(); if (!code) return; var t = Date.now(); if (self.last[code] && t - self.last[code] < 3500) return; self.last[code] = t; onCode(code); };
     // v3.1: QR Code diutamakan; barcode lama (CODE-128/39) tetap terbaca agar kartu lama masih berlaku.
@@ -158,7 +158,7 @@ var Scanner = {
         try { return rd.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(new ZXing.HTMLCanvasElementLuminanceSource(cv)))).getText(); } catch (e) { return ''; } finally { try { rd.reset(); } catch (e) {} }
       };
     }
-    this.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    this.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: kamera === 'user' ? 'user' : 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });   // v3.2: kamera depan/belakang
     video.srcObject = this.stream; video.setAttribute('playsinline', ''); video.muted = true; await video.play();
     var tick = async function () {
       if (!self.stream) return;
@@ -211,10 +211,10 @@ registerPage('guru', 'absensi', {
     $('#aScan', el).innerHTML = '<div class="card"><div class="toolbar"><div class="field"><label class="lbl">Rekap Kelas</label><select class="sel" id="scKelas"></select></div><div class="field"><label class="lbl">Tanggal</label><div class="inp-ic">' + ic('calendar') + '<input class="inp" value="Hari ini — ' + esc(tglIndo(todayStr(), true)) + '" readonly></div></div>' +
       '<div class="field"><label class="lbl">Sesi / Mapel (opsional)</label><input class="inp" id="scSesi" placeholder="Jam ke-1 • Matematika"></div><button class="btn btn-dark" id="scSync">' + ic('refresh-cw') + 'Load / Sync</button></div></div>' +
       '<div class="grid g-main mt16"><div class="card card-p"><div class="scan-box qr" id="scBox"><video id="scVideo" muted playsinline></video><div class="grid-bg"></div><div class="frame"><i></i><i></i><i></i><i></i></div><div class="laser" id="scLaser" hidden></div><span class="tl off" id="scLive">KAMERA MATI</span><span class="tr2" id="scMode">' + ic('video') + ' Siap</span><div class="hint">Arahkan QR Code kartu siswa (cetak / layar HP) ke kotak</div>' +
-      '<div class="foot"><span>' + ic('cctv') + 'Kamera belakang</span><span id="scGps">' + ic('map-pin') + 'GPS belum aktif</span><span id="scAlat">' + ic('scan-qr-code') + 'Alat scan USB/Bluetooth: siap</span></div></div>' +
+      '<div class="foot"><button type="button" class="cam-tgl" id="scCam" title="Ganti kamera depan / belakang">' + ic('switch-camera') + '<span>' + (Store.get('scanKamera', 'environment') === 'user' ? 'Kamera depan' : 'Kamera belakang') + '</span></button><span id="scGps">' + ic('map-pin') + 'GPS belum aktif</span><span id="scAlat">' + ic('scan-qr-code') + 'Alat scan USB/Bluetooth: siap</span></div></div>' +
       '<div class="grid mt16" style="grid-template-columns:minmax(0,1fr) auto;gap:12px"><button class="btn btn-dark btn-lg" id="scStart">' + ic('play', 'amber') + 'START SCANNER (AKTIFKAN KAMERA)</button><button class="btn btn-soft btn-lg" id="scStop">' + ic('circle-stop') + 'STOP</button></div>' +
       '<form class="row mt12" id="scManual"><div class="inp-ic grow">' + ic('keyboard') + '<input class="inp mono" id="scCode" placeholder="Ketik ID / pakai alat scan QR: ID-20230101 lalu Enter" autocomplete="off"></div><button class="btn btn-outline">Catat</button></form>' +
-      (DEMO ? '<label class="chk small mt12"><input type="checkbox" id="scSim" ' + (st.simulasi ? 'checked' : '') + '> Mode demo: simulasikan GPS guru berada di titik sekolah</label>' : '') +
+      (DEMO && cfg('GPS_WAJIB_SCAN', 'YA') === 'YA' ? '<label class="chk small mt12"><input type="checkbox" id="scSim" ' + (st.simulasi ? 'checked' : '') + '> Mode demo: simulasikan GPS guru berada di titik sekolah</label>' : '') +
       '<div id="scLast"></div></div>' +
       '<div class="card"><div class="card-h"><div class="grow"><h3>Scan Terbaru Hari Ini</h3><p>Aliran kehadiran real-time</p></div><span class="pill" id="scPct"></span></div><div class="card-b"><div class="grid g4" id="scStat" style="gap:8px;background:var(--surface-3);border-radius:10px;padding:12px"></div><div id="scList" class="mt12"></div></div></div></div>';
     $('#scKelas', el).onchange = function () { st.kelas = this.value; self.recent(el); };
@@ -223,6 +223,13 @@ registerPage('guru', 'absensi', {
     $('#scStop', el).onclick = function () { self.stopScan(el); };
     $('#scManual', el).onsubmit = function (e) { e.preventDefault(); var v = $('#scCode', el).value.trim(); if (v) { self.onScan(el, v); $('#scCode', el).value = ''; } };
     if ($('#scSim', el)) $('#scSim', el).onchange = function () { st.simulasi = this.checked; self.gpsLabel(el); };
+    $('#scCam', el).onclick = function () {                       // v3.2: pilihan kamera depan (mis. tablet/laptop di gerbang)
+      var baru = Store.get('scanKamera', 'environment') === 'user' ? 'environment' : 'user';
+      Store.set('scanKamera', baru); $('span', this).textContent = baru === 'user' ? 'Kamera depan' : 'Kamera belakang';
+      $('#scVideo', el).classList.toggle('cermin', baru === 'user');
+      if (Scanner.stream) self.startScan(el);
+    };
+    $('#scVideo', el).classList.toggle('cermin', Store.get('scanKamera', 'environment') === 'user');
     this.gpsLabel(el);
     this.pasangAlatScan(el);
   },
@@ -250,22 +257,23 @@ registerPage('guru', 'absensi', {
   },
   gpsLabel: function (el) {
     var st = this.st, lab = $('#scGps', el); if (!lab) return;
+    if (cfg('GPS_WAJIB_SCAN', 'YA') !== 'YA') { lab.innerHTML = ic('map-pin-off') + 'Verifikasi lokasi nonaktif — cukup QR Code'; return; }   // v3.2
     var pos = this.pos();
     if (!pos) { lab.innerHTML = ic('map-pin') + (st.gpsErr ? esc(st.gpsErr) : 'GPS belum aktif'); return; }
     var b = Geo.hitung(pos)[0];
     lab.innerHTML = ic('map-pin') + (!b ? 'Belum ada lokasi' : b.ok ? 'Radius Valid (' + b.jarak + 'm dari ' + esc(b.nama) + ')' : '<span style="color:#FCA5A5">Di luar radius (' + fmtJarak(b.jarak) + ' dari ' + esc(b.nama) + ')</span>');
   },
-  pos: function () { var st = this.st, l = Geo.lokasi()[0]; return st.simulasi && DEMO && l ? { lat: Number(l.latitude) + 0.0001, lng: Number(l.longitude) + 0.0001, acc: 10 } : st.gps; },
+  pos: function () { var st = this.st, l = Geo.lokasi()[0]; if (cfg('GPS_WAJIB_SCAN', 'YA') !== 'YA') return null; return st.simulasi && DEMO && l ? { lat: Number(l.latitude) + 0.0001, lng: Number(l.longitude) + 0.0001, acc: 10 } : st.gps; },
   startScan: async function (el) {
     var st = this.st, self = this, btn = $('#scStart', el);
     btnBusy(btn, true);
-    if (!(st.simulasi && DEMO) && navigator.geolocation) {
+    if (!(st.simulasi && DEMO) && navigator.geolocation && cfg('GPS_WAJIB_SCAN', 'YA') === 'YA') {   // v3.2: GPS tidak diminta bila geofence dimatikan Super Admin
       if (this._watch) navigator.geolocation.clearWatch(this._watch);
       this._watch = navigator.geolocation.watchPosition(function (p) { st.gps = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy) }; st.gpsErr = ''; self.gpsLabel(el); },
         function (e) { st.gpsErr = e.code === 1 ? 'Izin lokasi ditolak' : 'GPS tidak terbaca'; self.gpsLabel(el); }, { enableHighAccuracy: true, maximumAge: 15000, timeout: 20000 });
     }
     try {
-      var mode = await Scanner.start($('#scVideo', el), function (code) { self.onScan(el, code); });
+      var mode = await Scanner.start($('#scVideo', el), function (code) { self.onScan(el, code); }, Store.get('scanKamera', 'environment'));
       $('#scLive', el).className = 'tl'; $('#scLive', el).textContent = 'LIVE FEED'; $('#scLaser', el).hidden = false;
       $('#scMode', el).innerHTML = ic('video') + (mode === 'native' ? ' Detektor QR bawaan' : ' Dekoder QR (ZXing)');
     } catch (e) {

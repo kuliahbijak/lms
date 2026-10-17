@@ -161,10 +161,11 @@ function showLogin() {
     var id = $('#lgId').value.trim(), pw = $('#lgPw').value, btn = $('#lgBtn'), err = $('#lgErr');
     err.hidden = true;
     if (!id || !pw) { err.hidden = false; err.innerHTML = ic('circle-alert') + '<div>Email/NIS dan password wajib diisi.</div>'; return; }
+    if (window.Captcha && Captcha.kosong()) { err.hidden = false; err.innerHTML = ic('circle-alert') + '<div>Jawab soal verifikasi (captcha) terlebih dulu.</div>'; $('#lgCap').focus(); return; }   // v3.2
     btnBusy(btn, true);
-    var res = await api('login', { id: id, password: pw, role: loginRole, remember: $('#lgRemember').checked, appUrl: DEMO ? '' : location.origin + location.pathname });
+    var res = await api('login', { id: id, password: pw, role: loginRole, remember: $('#lgRemember').checked, appUrl: DEMO ? '' : location.origin + location.pathname, captcha: window.Captcha ? Captcha.isian() : undefined });
     btnBusy(btn, false);
-    if (!res.success) { err.hidden = false; err.innerHTML = ic('circle-alert') + '<div>' + esc(res.message) + '</div>'; $('#lgPw').select(); return; }
+    if (!res.success) { err.hidden = false; err.innerHTML = ic('circle-alert') + '<div>' + esc(res.message) + '</div>'; if (window.Captcha) Captcha.muat(res.data && res.data.code === 'CAPTCHA'); if (!(res.data && res.data.code === 'CAPTCHA')) $('#lgPw').select(); return; }
     Store.set('lastRole', loginRole);
     if ($('#lgRemember').checked) Store.set('lastId', id); else Store.del('lastId');
     var d = res.data;
